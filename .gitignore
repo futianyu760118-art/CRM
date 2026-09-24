@@ -1,0 +1,57 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# ---- Node ----
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# ---- Env / 本地文件（必须排除，含子目录） ----
+.env
+.env.*
+!.env.example
+!.env.local.example
+**/.env
+**/.env.*
+**/.env.local
+
+# ---- 业务隐私：实际客户/单据数据 ----
+# 历史询价 Excel（193MB，含真实客户与业务员姓名）
+销2询价.xlsx
+星耀内置混动.xlsx
+*.xlsx
+!frontend/**/*.xlsx
+
+# 内部项目 PDF（PRD / 立项 / 架构 / 冲刺）
+*.pdf
+
+# 内部项目文档（PDF / 汇报）
+/docs/
+/README.md
+
+# ---- IDE / OS ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ---- 运行产物 ----
+*.log
+storage/
+backend/storage/
+
+# ---- Next/TypeScript 缓存 ----
+frontend/.next/
+frontend/tsconfig.tsbuildinfo
+frontend/.eslintcache

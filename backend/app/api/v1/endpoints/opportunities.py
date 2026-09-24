@@ -1,0 +1,282 @@
+"""M3 商机接口：CRUD + 阶段流转 + 阶段目录（状态机）。"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Any
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import or_, select
+
+from app.core import response as resp
+from app.core.deps import DbSession, require_permission
+from app.core.exceptions import ApiError, ForbiddenError, NotFoundError
+from app.db.base import utcnow
+from app.domain.state_machine import (
+    OPPORTUNITY_STAGES,
+    STAGE_LABELS,
+    STAGE_RULES,
+    allowed_opportunity_transitions,
+    validate_opportunity_transition,
+)
+from app.models.business import Company, Opportunity
+from app.models.user import User
+from app.schemas.business import (
+    OpportunityCreate,
+    OpportunityOut,
+    OpportunityStageIn,
+    OpportunityUpdate,
+    StageCatalogOut,
+)
+from app.services.data_scope import apply_data_scope, get_user_scope
+from app.services.number_sequence import next_number
+from app.services.query import apply_sort, get_or_404, paginate, soft_delete
+
+router = APIRouter(prefix="/opportunities", tags=["M3-商机"])
+
+WON_STAGES = {"WON", "LOST"}
+
+
+async def _to_out(db: DbSession, opp: Opportunity) -> dict[str, Any]:
+    data = OpportunityOut.model_validate(opp).model_dump(mode="json")
+    company = (await db.execute(select(Company.name).where(Company.id == opp.company_id))).scalar_one_or_none()
+    data["company_name"] = company
+    data["stage_label"] = STAGE_LABELS.get(opp.stage, opp.stage)
+    return data
+
+
+@router.get("/stages", summary="商机阶段目录（状态机定义）")
+async def stage_catalog(_: User = Depends(require_permission("opportunity:view"))) -> dict[str, Any]:
+    catalog = []
+    for stage in OPPORTUNITY_STAGES:
+        rule = STAGE_RULES.get(stage)
+        catalog.append(
+            StageCatalogOut(
+                value=stage,
+                label=STAGE_LABELS.get(stage, stage),
+                next_stages=allowed_opportunity_transitions(stage),
+                required_fields=rule.required_fields if rule else [],
+                roles=rule.roles if rule else [],
+            ).model_dump(mode="json")
+        )
+    return resp.ok(catalog)
+
+
+@router.get("", summary="商机列表")
+async def list_opportunities(
+    db: DbSession,
+    current: User = Depends(require_permission("opportunity:view")),
+    keyword: str | None = None,
+    stage: str | None = None,
+    company_id: uuid.UUID | None = None,
+    owner_id: uuid.UUID | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    sort: str = "created_at",
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+) -> dict[str, Any]:
+    stmt = select(Opportunity).where(Opportunity.deleted_at.is_(None))
+    if keyword:
+        like = f"%{keyword}%"
+        stmt = stmt.where(or_(Opportunity.name.ilike(like), Opportunity.opportunity_no.ilike(like)))
+    if stage:
+        stmt = stmt.where(Opportunity.stage == stage)
+    if company_id:
+        stmt = stmt.where(Opportunity.company_id == company_id)
+    if owner_id:
+        stmt = stmt.where(Opportunity.owner_id == owner_id)
+    stmt = await apply_data_scope(stmt, Opportunity, current, db)
+
+    stmt = apply_sort(stmt, Opportunity, sort, order)
+    rows, total = await paginate(db, stmt, page, page_size)
+
+    company_ids = {r.company_id for r in rows}
+    names: dict[uuid.UUID, str] = {}
+    if company_ids:
+        found = (await db.execute(select(Company.id, Company.name).where(Company.id.in_(company_ids)))).all()
+        names = {c[0]: c[1] for c in found}
+
+    items = []
+    for row in rows:
+        data = OpportunityOut.model_validate(row).model_dump(mode="json")
+        data["company_name"] = names.get(row.company_id)
+        data["stage_label"] = STAGE_LABELS.get(row.stage, row.stage)
+        items.append(data)
+    return resp.page(items, total, page, page_size)
+
+
+@router.get("/kanban", summary="商机看板（按阶段分组）")
+async def kanban(
+    db: DbSession,
+    current: User = Depends(require_permission("opportunity:view")),
+) -> dict[str, Any]:
+    stmt = select(Opportunity).where(Opportunity.deleted_at.is_(None))
+    stmt = await apply_data_scope(stmt, Opportunity, current, db)
+    rows = (await db.execute(stmt.order_by(Opportunity.created_at.desc()))).scalars().all()
+
+    company_ids = {r.company_id for r in rows}
+    names: dict[uuid.UUID, str] = {}
+    if company_ids:
+        found = (await db.execute(select(Company.id, Company.name).where(Company.id.in_(company_ids)))).all()
+        names = {c[0]: c[1] for c in found}
+
+    columns: list[dict[str, Any]] = []
+    for stage in OPPORTUNITY_STAGES:
+        cards = []
+        amount = 0.0
+        for row in rows:
+            if row.stage != stage:
+                continue
+            amount += float(row.estimated_amount or 0)
+            cards.append(
+                {
+                    "id": str(row.id),
+                    "opportunity_no": row.opportunity_no,
+                    "name": row.name,
+                    "company_name": names.get(row.company_id),
+                    "estimated_amount": float(row.estimated_amount or 0),
+                    "currency": row.currency,
+                    "owner_id": str(row.owner_id) if row.owner_id else None,
+                    "probability": row.probability,
+                }
+            )
+        columns.append(
+            {
+                "stage": stage,
+                "label": STAGE_LABELS.get(stage, stage),
+                "count": len(cards),
+                "amount": round(amount, 2),
+                "cards": cards,
+            }
+        )
+    return resp.ok({"columns": columns})
+
+
+@router.post("", summary="新建商机", status_code=201)
+async def create_opportunity(
+    payload: OpportunityCreate,
+    db: DbSession,
+    current: User = Depends(require_permission("opportunity:create")),
+) -> dict[str, Any]:
+    company = (
+        await db.execute(select(Company).where(Company.id == payload.company_id, Company.deleted_at.is_(None)))
+    ).scalar_one_or_none()
+    if company is None:
+        raise NotFoundError("客户不存在")
+
+    opp = Opportunity(
+        **payload.model_dump(exclude_unset=True),
+        opportunity_no=await next_number("opportunity"),
+        stage="NEW",
+        owner_id=payload.owner_id or current.id,
+        department_id=current.department_id,
+    )
+    db.add(opp)
+    await db.commit()
+    await db.refresh(opp)
+    return resp.ok(await _to_out(db, opp))
+
+
+@router.get("/{opp_id}", summary="商机详情")
+async def get_opportunity(
+    opp_id: uuid.UUID,
+    db: DbSession,
+    current: User = Depends(require_permission("opportunity:view")),
+) -> dict[str, Any]:
+    opp = await get_or_404(db, Opportunity, opp_id, "商机")
+    scope_type, dept_ids = await get_user_scope(current, db)
+    if scope_type != "ALL" and opp.owner_id != current.id and opp.department_id not in dept_ids:
+        raise ForbiddenError("无权访问该商机")
+    return resp.ok(await _to_out(db, opp))
+
+
+@router.put("/{opp_id}", summary="更新商机")
+async def update_opportunity(
+    opp_id: uuid.UUID,
+    payload: OpportunityUpdate,
+    db: DbSession,
+    _: User = Depends(require_permission("opportunity:update")),
+) -> dict[str, Any]:
+    opp = await get_or_404(db, Opportunity, opp_id, "商机")
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(opp, key, value)
+    await db.commit()
+    await db.refresh(opp)
+    return resp.ok(await _to_out(db, opp))
+
+
+@router.delete("/{opp_id}", summary="删除商机（软删除）")
+async def delete_opportunity(
+    opp_id: uuid.UUID,
+    db: DbSession,
+    _: User = Depends(require_permission("opportunity:delete")),
+) -> dict[str, Any]:
+    opp = await get_or_404(db, Opportunity, opp_id, "商机")
+    soft_delete(opp)
+    await db.commit()
+    return resp.ok({"deleted": True})
+
+
+@router.patch("/{opp_id}/stage", summary="变更商机阶段")
+async def change_stage(
+    opp_id: uuid.UUID,
+    payload: OpportunityStageIn,
+    db: DbSession,
+    current: User = Depends(require_permission("opportunity:stage")),
+) -> dict[str, Any]:
+    opp = await get_or_404(db, Opportunity, opp_id, "商机")
+    target = payload.stage
+
+    rule = STAGE_RULES.get(target)
+    roles = set(current.role_codes)
+    if (
+        not current.is_superuser
+        and rule
+        and roles.isdisjoint(set(rule.roles))
+        and "admin" not in roles
+        and "manager" not in roles
+    ):
+        raise ForbiddenError(f"该阶段仅限角色 {', '.join(rule.roles)} 操作")
+
+    context = payload.model_dump(exclude_unset=True)
+    missing = validate_opportunity_transition(opp.stage, target, context)
+    if "__invalid_target__" in missing:
+        raise ApiError(message=f"未知阶段：{target}", http_status=400)
+    if "__invalid_transition__" in missing:
+        allowed = allowed_opportunity_transitions(opp.stage)
+        raise ApiError(
+            message=f"不允许从 {opp.stage} 流转到 {target}；可选：{', '.join(allowed) or '无'}",
+            http_status=400,
+        )
+    if missing:
+        labels = {"name": "名称", "company_id": "客户", "lost_reason": "流失原因"}
+        raise ApiError(
+            message="进入该阶段需先填写：" + "、".join(labels.get(m, m) for m in missing),
+            http_status=400,
+        )
+
+    for field in (
+        "lost_reason",
+        "won_amount",
+        "sample_record",
+        "negotiation_record",
+        "requirement",
+        "estimated_amount",
+        "product_category",
+        "quantity",
+        "inquiry_id",
+        "pricing_id",
+        "quotation_amount",
+    ):
+        if field in context and context[field] is not None:
+            setattr(opp, field, context[field])
+
+    opp.stage = target
+    if target in WON_STAGES:
+        opp.status = "CLOSED"
+    else:
+        opp.status = "OPEN"
+    opp.last_followup_at = utcnow()
+    await db.commit()
+    await db.refresh(opp)
+    return resp.ok(await _to_out(db, opp))

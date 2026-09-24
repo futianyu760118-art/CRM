@@ -1,0 +1,57 @@
+[project]
+name = "crm-backend"
+version = "0.1.0"
+description = "外贸销售CRM及询报价管理平台 - 后端服务 (M1 系统骨架)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "sqlalchemy[asyncio]>=2.0.25",
+    "asyncpg>=0.29.0",
+    "greenlet>=3.0.3",
+    "alembic>=1.13.1",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.2.0",
+    "email-validator>=2.1.0",
+    "PyJWT>=2.8.0",
+    "bcrypt>=4.1.2",
+    "redis>=5.0.1",
+    "minio>=7.2.5",
+    "celery>=5.3.6",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27.0",
+    "reportlab>=4.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.5",
+    "ruff>=0.3.0",
+    "mypy>=1.9.0",
+    "types-redis",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "C4", "SIM"]
+ignore = [
+    # FastAPI 的 Depends(...) / Query(...) 依赖注入惯用法
+    "B008",
+]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]

@@ -1,0 +1,23 @@
+"""错误码常量（DOC-DEV-001 § 2.3）。"""
+
+from __future__ import annotations
+
+
+class ErrCode:
+    # 参数
+    PARAM_ERROR = 40001
+    VALIDATION_ERROR = 40002
+    NOT_FOUND = 40004
+    CONFLICT = 40009
+    # 认证
+    UNAUTHORIZED = 40101
+    TOKEN_EXPIRED = 40102
+    TOKEN_INVALID = 40103
+    BAD_CREDENTIALS = 40104
+    ACCOUNT_DISABLED = 40105
+    # 权限
+    FORBIDDEN = 40301
+    DATA_SCOPE_DENIED = 40302
+    # 系统
+    INTERNAL_ERROR = 50000
+    SERVICE_UNAVAILABLE = 50001
