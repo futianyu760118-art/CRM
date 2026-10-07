@@ -11,6 +11,7 @@ from app.api.v1.endpoints import (
     contacts,
     dashboard,
     departments,
+    ebms,
     emails,
     files,
     inquiries,
@@ -62,6 +63,9 @@ api_router.include_router(emails.mail_router)
 
 # M6 K3 集成
 api_router.include_router(integrations.router)
+
+# M6 EBMS 集成（AEOS 契约）
+api_router.include_router(ebms.router)
 
 # 通用文件
 api_router.include_router(files.router)

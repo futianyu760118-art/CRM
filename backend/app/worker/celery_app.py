@@ -1,4 +1,4 @@
-"""Celery 应用（M1 预留：邮件收发 / K3 同步 / PDF 生成）。"""
+"""Celery 应用（M1 预留：邮件收发 / K3 同步 / EBMS 投递 / PDF 生成）。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ celery_app = Celery(
     "crm",
     broker=settings.redis_url,
     backend=settings.redis_url,
+    include=["app.worker.tasks"],
 )
 
 celery_app.conf.update(
@@ -19,7 +20,14 @@ celery_app.conf.update(
     timezone="Asia/Shanghai",
     enable_utc=True,
     task_track_started=True,
-    beat_schedule={},
+    beat_schedule={
+        # EBMS（AEOS 契约）投递：每分钟消费一次 Outbox
+        "ebms-deliver-pending": {
+            "task": "ebms.deliver_pending",
+            "schedule": 60.0,
+            "kwargs": {"limit": 50},
+        },
+    },
 )
 
 
