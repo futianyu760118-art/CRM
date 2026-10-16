@@ -42,6 +42,8 @@ class IntegrationOutbox(BaseModel):
 
     event_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     biz_type: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    # 与 integration_log.idempotency_key 对齐，保证 Outbox 与日志可精确定位、可对账
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
     biz_id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False, index=True)
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False, index=True)

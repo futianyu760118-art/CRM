@@ -7,6 +7,7 @@ class ErrCode:
     # 参数
     PARAM_ERROR = 40001
     VALIDATION_ERROR = 40002
+    CONTRACT_INVALID = 40003
     NOT_FOUND = 40004
     CONFLICT = 40009
     # 认证
