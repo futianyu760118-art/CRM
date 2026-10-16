@@ -20,6 +20,9 @@ SEQUENCE_DEFS: dict[str, tuple[str, str, str]] = {
     "quotation": ("报价编号", "QUO", "MONTH"),
     "order": ("订单编号", "ORD", "MONTH"),
     "company": ("客户编码", "CUS", "NEVER"),
+    # 销售中心 6 模块（PAND-249）
+    "sample": ("样品编号", "SMP", "NEVER"),
+    "feedback": ("反馈编号", "FB", "DAY"),
 }
 
 
@@ -51,13 +54,17 @@ def _format(prefix: str, period: str, now: datetime, seq: int) -> str:
 def format_number(key: str, now: datetime, seq: int) -> str:
     """按业务规则格式化编号。
 
-    - inquiry（询价单）：JFX{YYYYMMDD}-{序号:03d}，如 JFX20260916-212（全局递增，不按日重置）
+    - inquiry（询价单）：JFX{YYYYMMDD}{序号:03d}，如 JFX20260916001（AC-M2.2 `^JFX\\d{8}\\d{3}$`）
+    - feedback（反馈）：FB{YYYYMMDD}{序号:03d}
+    - sample（样品）：SMP-{序号:04d}（全局递增，不按日重置）
     - 其余沿用 {PREFIX}-{期间}-{序号:04d}
     """
     if key not in SEQUENCE_DEFS:
         raise KeyError(f"未定义的编号类型: {key}")
     if key == "inquiry":
-        return f"JFX{now:%Y%m%d}-{seq:03d}"
+        return f"JFX{now:%Y%m%d}{seq:03d}"
+    if key == "feedback":
+        return f"FB{now:%Y%m%d}{seq:03d}"
     _, prefix, period = SEQUENCE_DEFS[key]
     return _format(prefix, period, now, seq)
 
@@ -115,6 +122,7 @@ async def peek_next_number(key: str) -> str:
 def _sequence_sources() -> dict[str, tuple[Any, str]]:
     from app.models.business import Company, Inquiry, Lead, Opportunity
     from app.models.pricing import Quotation
+    from app.models.sales import Feedback, Sample
 
     return {
         "lead": (Lead, "lead_no"),
@@ -122,6 +130,8 @@ def _sequence_sources() -> dict[str, tuple[Any, str]]:
         "inquiry": (Inquiry, "inquiry_no"),
         "quotation": (Quotation, "quotation_no"),
         "company": (Company, "code"),
+        "sample": (Sample, "sample_no"),
+        "feedback": (Feedback, "feedback_no"),
     }
 
 

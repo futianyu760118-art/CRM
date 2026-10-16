@@ -12,16 +12,21 @@ from app.api.v1.endpoints import (
     dashboard,
     departments,
     ebms,
+    ebms_ingest,
     emails,
+    feedback,
     files,
     inquiries,
     integrations,
     leads,
     opportunities,
+    orders,
     pricing,
     products,
     quotations,
+    quote_library,
     roles,
+    samples,
     system,
     tasks,
     users,
@@ -57,6 +62,12 @@ api_router.include_router(pricing.rules_router)
 api_router.include_router(quotations.router)
 api_router.include_router(approvals.router)
 
+# 销售中心 6 模块（PAND-249）
+api_router.include_router(orders.router)
+api_router.include_router(samples.router)
+api_router.include_router(quote_library.router)
+api_router.include_router(feedback.router)
+
 # M5 邮件闭环
 api_router.include_router(emails.account_router)
 api_router.include_router(emails.mail_router)
@@ -66,6 +77,7 @@ api_router.include_router(integrations.router)
 
 # M6 EBMS 集成（AEOS 契约）
 api_router.include_router(ebms.router)
+api_router.include_router(ebms_ingest.router)
 
 # 通用文件
 api_router.include_router(files.router)

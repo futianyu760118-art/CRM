@@ -20,6 +20,8 @@ EBMS 仓库当前**不存在** `contracts/aeos-contracts-v1.schema.json`，因�
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 from datetime import date, datetime
 from typing import Any, Literal
@@ -29,9 +31,24 @@ from pydantic import ValidationError as PydanticValidationError
 
 from app.core.error_codes import ErrCode
 from app.core.exceptions import ApiError
+from app.domain.state_machine import (
+    CUSTOMER_LEVELS,
+    CUSTOMER_STATUSES,
+    FEEDBACK_PRIORITIES,
+    FEEDBACK_STATUSES,
+    FEEDBACK_TYPES,
+    INQUIRY_CERTIFICATE_LEVELS,
+    INQUIRY_STATUSES_V2,
+    ORDER_RISK_FILTER,
+    ORDER_STATUSES,
+    QUOTE_LIBRARY_CERTIFICATE_LEVELS,
+    SALES_MODES,
+    SAMPLE_STATUSES,
+)
 
 RESULT_CONTRACT_VERSION = "AEOS.Result.V1"
 EXCEPTION_CONTRACT_VERSION = "AEOS.Exception.V1"
+EVENT_CONTRACT_VERSION = "AEOS.Event.V1"
 
 #: 基线 examples.json 中 Result.status 的实际取值（未做扩展）
 RESULT_STATUSES: tuple[str, ...] = ("VERIFIED",)
@@ -132,12 +149,7 @@ class AeosExceptionContract(BaseModel):
         return self.exception_id
 
 
-AeosContract = AeosResultContract | AeosExceptionContract
-
-_CONTRACT_MODELS: dict[str, type[AeosResultContract] | type[AeosExceptionContract]] = {
-    RESULT_CONTRACT_VERSION: AeosResultContract,
-    EXCEPTION_CONTRACT_VERSION: AeosExceptionContract,
-}
+# 契约模型注册表在文件末尾（Event 契约类定义之后）统一组装，见 `_CONTRACT_MODELS`。
 
 
 def _error_data(exc: PydanticValidationError) -> list[dict[str, Any]]:
@@ -253,3 +265,165 @@ def build_exception_contract(
     if extra:
         payload.update(extra)
     return validate_contract(payload)  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# AEOS.Event.V1 —— 实体同步信封（PAND-249：CRM ↔ EBMS 双向同步）
+#
+# 契约冻结版 §4：13 种事件 = 6 个业务实体 × {upserted, deleted} + dictionary.upserted。
+# 幂等键 = {target_system}:{event_type}:{object_id}:{fingerprint}；
+# fingerprint = sha1(canonical(event 去掉 occurred_at))[:16]，
+# canonical = UTF-8、键排序、无空格、金额/数量按十进制字符串（规避浮点漂移）。
+# ---------------------------------------------------------------------------
+
+#: 可同步的对象类型（dictionary 仅 upserted，不产生 deleted）
+EVENT_OBJECT_TYPES: tuple[str, ...] = (
+    "customer",
+    "inquiry",
+    "quote_library",
+    "order",
+    "sample",
+    "feedback",
+    "dictionary",
+)
+
+ENTITY_UPSERT_EVENTS: tuple[str, ...] = tuple(f"{t}.upserted" for t in EVENT_OBJECT_TYPES)
+ENTITY_DELETE_EVENTS: tuple[str, ...] = tuple(f"{t}.deleted" for t in EVENT_OBJECT_TYPES if t != "dictionary")
+EVENT_TYPES: tuple[str, ...] = ENTITY_UPSERT_EVENTS + ENTITY_DELETE_EVENTS
+
+
+def upsert_event_for(object_type: str) -> str:
+    if object_type not in EVENT_OBJECT_TYPES:
+        raise ValueError(f"未知对象类型: {object_type!r}")
+    return f"{object_type}.upserted"
+
+
+def delete_event_for(object_type: str) -> str:
+    if object_type not in EVENT_OBJECT_TYPES or object_type == "dictionary":
+        raise ValueError(f"{object_type!r} 不产生 deleted 事件")
+    return f"{object_type}.deleted"
+
+
+#: 取值域（单一事实来源 = app.domain.state_machine）
+EVENT_VALUE_DOMAINS: dict[str, tuple[str, ...]] = {
+    "customer_level": tuple(CUSTOMER_LEVELS),
+    "sales_mode": tuple(SALES_MODES),
+    "customer_status": tuple(CUSTOMER_STATUSES),
+    "inquiry_certificate_level": tuple(INQUIRY_CERTIFICATE_LEVELS),
+    "quote_library_certificate_level": tuple(QUOTE_LIBRARY_CERTIFICATE_LEVELS),
+    "inquiry_status": tuple(INQUIRY_STATUSES_V2),
+    "order_status": tuple(ORDER_STATUSES),
+    "order_risk_level": tuple(ORDER_RISK_FILTER),
+    "sample_status": tuple(SAMPLE_STATUSES),
+    "feedback_type": tuple(FEEDBACK_TYPES),
+    "feedback_priority": tuple(FEEDBACK_PRIORITIES),
+    "feedback_status": tuple(FEEDBACK_STATUSES),
+}
+
+
+class AeosEventContract(BaseModel):
+    """AEOS.Event.V1 —— 实体增删改事件（含完整实体 payload）。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    contract_version: Literal["AEOS.Event.V1"]
+    event_id: str = Field(min_length=1, max_length=100)
+    event_type: str = Field(min_length=1, max_length=100)
+    source_system: str = Field(min_length=1, max_length=30)
+    object_type: str = Field(min_length=1, max_length=50)
+    object_id: str = Field(min_length=1, max_length=100)
+    occurred_at: datetime
+    trace_id: str = Field(min_length=1, max_length=100)
+    payload: dict[str, Any]
+
+    @model_validator(mode="after")
+    def _validate_enums(self) -> AeosEventContract:
+        if self.event_type not in EVENT_TYPES:
+            raise ValueError(f"event_type 取值越界: {self.event_type!r}")
+        if self.object_type not in EVENT_OBJECT_TYPES:
+            raise ValueError(f"object_type 取值越界: {self.object_type!r}")
+        return self
+
+    @property
+    def contract_id(self) -> str:
+        return self.event_id
+
+
+def build_event_contract(
+    *,
+    event_id: str,
+    event_type: str,
+    source_system: str,
+    object_type: str,
+    object_id: str,
+    payload: Mapping[str, Any],
+    trace_id: str,
+    occurred_at: datetime,
+) -> AeosEventContract:
+    """构造并校验 Event 契约，保证产出即合规。"""
+    return validate_contract(  # type: ignore[return-value]
+        {
+            "contract_version": EVENT_CONTRACT_VERSION,
+            "event_id": event_id,
+            "event_type": event_type,
+            "source_system": source_system,
+            "object_type": object_type,
+            "object_id": object_id,
+            "occurred_at": occurred_at,
+            "trace_id": trace_id,
+            "payload": dict(payload),
+        }
+    )
+
+
+def _canonicalize(value: Any) -> Any:
+    """规整为稳定可序列化形态：金额/数量 → 十进制字符串，键排序、无空格。"""
+    if isinstance(value, dict):
+        return {str(k): _canonicalize(v) for k, v in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize(v) for v in value]
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, float):
+        return format(value, ".4f")
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return str(value)
+
+
+def canonical_json(payload: Mapping[str, Any]) -> str:
+    """canonical 序列化：UTF-8、键排序、无空格。"""
+    return json.dumps(_canonicalize(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def event_fingerprint(event: Mapping[str, Any]) -> str:
+    """事件内容指纹：排除易变时钟 `occurred_at`。"""
+    stable = {k: v for k, v in event.items() if k != "occurred_at"}
+    return hashlib.sha1(canonical_json(stable).encode("utf-8")).hexdigest()[:16]
+
+
+def event_idempotency_key(target_system: str, event: Mapping[str, Any]) -> str:
+    """幂等键 = {target_system}:{event_type}:{object_id}:{fingerprint}。"""
+    return ":".join(
+        [
+            target_system,
+            str(event.get("event_type", "")),
+            str(event.get("object_id", "")),
+            event_fingerprint(event),
+        ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# 契约模型注册表（所有契约类定义完毕后再组装）
+# ---------------------------------------------------------------------------
+
+AeosContract = AeosResultContract | AeosExceptionContract | AeosEventContract
+
+_CONTRACT_MODELS: dict[str, Any] = {
+    RESULT_CONTRACT_VERSION: AeosResultContract,
+    EXCEPTION_CONTRACT_VERSION: AeosExceptionContract,
+    EVENT_CONTRACT_VERSION: AeosEventContract,
+}

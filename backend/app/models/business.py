@@ -54,7 +54,7 @@ class Company(BusinessModel):
     country: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
     currency: Mapped[str] = mapped_column(String(10), default="USD", nullable=False)
     industry: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    customer_level: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    customer_level: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
     source: Mapped[str | None] = mapped_column(String(50), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="ACTIVE", nullable=False, index=True)
     website: Mapped[str | None] = mapped_column(String(200), nullable=True)
@@ -62,6 +62,22 @@ class Company(BusinessModel):
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
     external_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     sync_status: Mapped[str | None] = mapped_column(String(20), default="PENDING", nullable=True)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # ---- PAND-249 销售中心客户段扩字段（Owner=CRM，可空）----
+    former_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    parent_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    sales_mode: Mapped[str | None] = mapped_column(String(30), default="外销", nullable=True)
+    customer_status: Mapped[str | None] = mapped_column(String(30), default="潜在客户", nullable=True, index=True)
+    decision_maker: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    decision_maker_position: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    decision_core_need: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_trade_year: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    invoice_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    tax_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    bank_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    bank_account: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    country_region: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     contacts: Mapped[list[Contact]] = relationship(
         back_populates="company", lazy="noload", cascade="all, delete-orphan"
@@ -84,6 +100,12 @@ class Contact(BusinessModel):
     wechat: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ---- PAND-249 联系人扩字段 ----
+    whatsapp: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    skype: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    other_im: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    kind: Mapped[str | None] = mapped_column(String(20), nullable=True, comment="decision 决策人 / contact 对接人")
 
     company: Mapped[Company | None] = relationship(back_populates="contacts", lazy="joined")
 
@@ -214,6 +236,12 @@ class Inquiry(BusinessModel):
     # 客户标准纵向块（字段为行、产品为列），原样保留用于展示与导出
     spec_rows: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
 
+    # ---- PAND-249 询价同步/扩字段 ----
+    external_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    sync_status: Mapped[str | None] = mapped_column(String(20), default="PENDING", nullable=True)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    quote_validity: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
     items: Mapped[list[InquiryItem]] = relationship(
         back_populates="inquiry", lazy="selectin", cascade="all, delete-orphan"
     )
@@ -268,6 +296,11 @@ class InquiryItem(BaseModel):
     quote_lead_time: Mapped[str | None] = mapped_column(String(100), nullable=True)
     other_requirement: Mapped[str | None] = mapped_column(Text, nullable=True)
     other_requirement2: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ---- PAND-249 询价明细扩字段 ----
+    internal_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    certificate_compliant: Mapped[str | None] = mapped_column(String(10), nullable=True, comment="是/否")
+    certificate_level: Mapped[str | None] = mapped_column(String(50), nullable=True, comment="国标/行标/企标/无证书")
 
     inquiry: Mapped[Inquiry] = relationship(back_populates="items", lazy="noload")
 

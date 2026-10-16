@@ -25,9 +25,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.contracts.aeos import (
     ContractValidationError,
+    build_event_contract,
     build_exception_contract,
     build_result_contract,
+    delete_event_for,
+    event_idempotency_key,
     to_wire,
+    upsert_event_for,
     validate_contract,
 )
 from app.core.config import settings
@@ -43,12 +47,15 @@ SOURCE_SYSTEM = "M05"
 
 EVENT_RESULT = "AEOS_RESULT_V1"
 EVENT_EXCEPTION = "AEOS_EXCEPTION_V1"
+EVENT_ENTITY = "AEOS_EVENT_V1"
 ACTION_RESULT = "RESULT_DELIVER"
 ACTION_EXCEPTION = "EXCEPTION_DELIVER"
+ACTION_ENTITY = "EVENT_DELIVER"
 
 _EVENT_ACTION: dict[str, str] = {
     EVENT_RESULT: ACTION_RESULT,
     EVENT_EXCEPTION: ACTION_EXCEPTION,
+    EVENT_ENTITY: ACTION_ENTITY,
 }
 
 OUTBOX_PENDING = "PENDING"
@@ -142,6 +149,7 @@ async def _enqueue(
     event_type: str,
     biz_type: str,
     biz_id: uuid.UUID,
+    idempotency_key: str | None = None,
 ) -> tuple[IntegrationOutbox | None, IntegrationLog | None, bool]:
     """事务内写入 Outbox + Log，返回 (outbox, log, created)。
 
@@ -151,7 +159,7 @@ async def _enqueue(
     action = _EVENT_ACTION[event_type]
     wire = to_wire(contract)
     contract_id = contract.contract_id
-    key = _idempotency(action, contract_id, wire)
+    key = idempotency_key or _idempotency(action, contract_id, wire)
 
     existing = await _latest_log(db, key)
     if existing is not None and existing.status in (LOG_PENDING, LOG_SUCCESS):
@@ -399,6 +407,61 @@ async def emit_delivery_overdue(
         "created": created_count,
         "skipped": len(rows) - created_count,
         "emitted": emitted,
+    }
+
+
+# ------------------------------------------------------------------ 实体事件（AEOS.Event.V1，PAND-249 双向同步出站）
+
+
+async def emit_entity_event(
+    db: AsyncSession,
+    *,
+    object_type: str,
+    object_id: str,
+    action: str = "upserted",
+    payload: dict[str, Any],
+    biz_type: str,
+    biz_id: uuid.UUID,
+    occurred_at: datetime | None = None,
+) -> dict[str, Any]:
+    """把 CRM 侧实体变更构造成 `AEOS.Event.V1` 入队 Outbox（不直写 EBMS 库）。
+
+    - 幂等键 = ``EBMS:{event_type}:{object_id}:{fingerprint}``，同内容重复写入被跳过，
+      数值变化产生新投递（与试点 A/B 幂等语义一致）。
+    - 本函数只负责入队，投递由 Worker/联调端点调用 ``deliver_pending`` 完成。
+    """
+    event_type = upsert_event_for(object_type) if action == "upserted" else delete_event_for(object_type)
+    contract = build_event_contract(
+        event_id=f"EVT-{SOURCE_SYSTEM}-{uuid.uuid4().hex[:12]}",
+        event_type=event_type,
+        source_system=SOURCE_SYSTEM,
+        object_type=object_type,
+        object_id=object_id,
+        payload=payload,
+        trace_id=f"TRACE-EVT-{SOURCE_SYSTEM}-{object_type}-{object_id}",
+        occurred_at=occurred_at or cn_now(),
+    )
+    wire = to_wire(contract)
+    key = event_idempotency_key("EBMS", wire)
+    _, log, created = await _enqueue(
+        db,
+        contract=contract,
+        event_type=EVENT_ENTITY,
+        biz_type=biz_type,
+        biz_id=biz_id,
+        idempotency_key=key,
+    )
+    await db.flush()
+    return {
+        "contract_version": contract.contract_version,
+        "event_id": contract.event_id,
+        "event_type": event_type,
+        "object_type": object_type,
+        "object_id": object_id,
+        "created": created,
+        "skipped": not created,
+        "log_id": str(log.id) if log else None,
+        "idempotency_key": key,
     }
 
 

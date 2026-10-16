@@ -219,7 +219,9 @@ async def outbox(
             "event_type": r.event_type,
             "biz_type": r.biz_type,
             "biz_id": str(r.biz_id),
-            "contract_id": (r.payload or {}).get("result_id") or (r.payload or {}).get("exception_id"),
+            "contract_id": (r.payload or {}).get("result_id")
+            or (r.payload or {}).get("exception_id")
+            or (r.payload or {}).get("event_id"),
             "status": r.status,
             "retry_count": r.retry_count,
             "available_at": r.available_at.isoformat() if r.available_at else None,

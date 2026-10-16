@@ -4,15 +4,19 @@ import {
   ApiOutlined,
   AppstoreOutlined,
   AuditOutlined,
+  BugOutlined,
   CalculatorOutlined,
   CheckSquareOutlined,
   ContactsOutlined,
   DashboardOutlined,
+  ExperimentOutlined,
   FileSearchOutlined,
   FunnelPlotOutlined,
+  GoldOutlined,
   MailOutlined,
   ProfileOutlined,
   SettingOutlined,
+  ShoppingCartOutlined,
   TeamOutlined,
 } from '@ant-design/icons';
 
@@ -30,6 +34,10 @@ const ICONS: Record<string, ReactNode> = {
   MailOutlined: <MailOutlined />,
   CheckSquareOutlined: <CheckSquareOutlined />,
   ApiOutlined: <ApiOutlined />,
+  ShoppingCartOutlined: <ShoppingCartOutlined />,
+  ExperimentOutlined: <ExperimentOutlined />,
+  GoldOutlined: <GoldOutlined />,
+  BugOutlined: <BugOutlined />,
   SettingOutlined: <SettingOutlined />,
 };
 

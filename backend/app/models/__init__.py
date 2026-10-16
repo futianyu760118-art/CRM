@@ -37,6 +37,15 @@ from app.models.pricing import (
     Quotation,
     QuotationItem,
 )
+from app.models.sales import (
+    Feedback,
+    FeedbackFollowup,
+    InquiryStatusLog,
+    QuoteLibrary,
+    SalesOrder,
+    Sample,
+    SyncConflict,
+)
 from app.models.support import (
     Dictionary,
     FeatureFlag,
@@ -89,6 +98,14 @@ __all__ = [
     "ApprovalInstance",
     "ApprovalTask",
     "ApprovalLog",
+    # 销售中心 6 模块（PAND-249）
+    "SalesOrder",
+    "Sample",
+    "QuoteLibrary",
+    "Feedback",
+    "FeedbackFollowup",
+    "SyncConflict",
+    "InquiryStatusLog",
     # M5 邮件
     "File",
     "EmailAccount",

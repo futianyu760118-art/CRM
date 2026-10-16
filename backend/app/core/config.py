@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     EBMS_SPOOL_DIR: str = "var/ebms-spool"
     EBMS_TIMEOUT_SECONDS: float = 10.0
     EBMS_MAX_RETRY: int = 5
+    # 入站摄入 Bearer Token（EBMS → CRM 同步通道鉴权）。
+    # 生产必须显式设置强随机值，禁止沿用默认口令（红线）。
+    EBMS_INBOUND_TOKEN: str = ""
 
     # MinIO
     MINIO_ENDPOINT: str = "localhost:9000"

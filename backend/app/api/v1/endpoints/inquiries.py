@@ -23,10 +23,10 @@ from app.schemas.business import (
     InquiryUpdate,
 )
 from app.schemas.pricing import PricingOut
-from app.services import export_excel
+from app.services import ebms_sync, export_excel
 from app.services.data_scope import apply_data_scope, get_user_scope
 from app.services.number_sequence import next_number
-from app.services.query import apply_sort, get_or_404, paginate
+from app.services.query import apply_sort, get_or_404, paginate, soft_delete
 
 router = APIRouter(prefix="/inquiries", tags=["M3-询价"])
 
@@ -167,6 +167,7 @@ async def create_inquiry(
         db.add(InquiryItem(inquiry_id=inquiry.id, **item))
     await db.flush()
     await _trim_items_total(db, inquiry)
+    await ebms_sync.emit_upsert(db, "inquiry", inquiry)
     await db.commit()
     await db.refresh(inquiry)
     return resp.ok(await _serialize(db, inquiry))
@@ -218,6 +219,7 @@ async def update_inquiry(
         from app.schemas.business import InquiryItemIn
 
         await _replace_items(db, inquiry.id, [InquiryItemIn(**i) for i in items])
+    await ebms_sync.emit_upsert(db, "inquiry", inquiry)
     await db.commit()
     await db.refresh(inquiry)
     return resp.ok(await _serialize(db, inquiry))
@@ -243,9 +245,24 @@ async def submit_inquiry(
         if opp is not None and opp.stage in {"REQUIREMENT", "NEW", "QUALIFIED"}:
             opp.stage = "INQUIRY"
             opp.inquiry_id = inquiry.id
+    await ebms_sync.emit_upsert(db, "inquiry", inquiry)
     await db.commit()
     await db.refresh(inquiry)
     return resp.ok(await _serialize(db, inquiry))
+
+
+@router.delete("/{inquiry_id}", summary="删除询价单（软删除）")
+async def delete_inquiry(
+    inquiry_id: uuid.UUID,
+    db: DbSession,
+    _: User = Depends(require_permission("inquiry:delete")),
+) -> dict[str, Any]:
+    inquiry = await get_or_404(db, Inquiry, inquiry_id, "询价单")
+    soft_delete(inquiry)
+    await db.flush()
+    await ebms_sync.emit_delete(db, "inquiry", inquiry)
+    await db.commit()
+    return resp.ok({"deleted": True})
 
 
 @router.get("/{inquiry_id}/export-excel", summary="导出询价单 Excel")

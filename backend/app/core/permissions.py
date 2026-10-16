@@ -57,6 +57,11 @@ PERMISSIONS: list[dict[str, Any]] = [
     _button("inquiry:create", "询价创建"),
     _button("inquiry:update", "询价编辑"),
     _button("inquiry:submit", "询价提交"),
+    _button("inquiry:price", "询价核价字段"),
+    _button("inquiry:status", "询价状态流转"),
+    _button("inquiry:import", "询价导入"),
+    _button("inquiry:export", "询价导出"),
+    _button("inquiry:delete", "询价删除"),
     # 核价
     _menu("pricing:view", "核价查看", "/pricing", "CalculatorOutlined", 80),
     _button("pricing:cost_view", "成本字段查看"),
@@ -83,6 +88,24 @@ PERMISSIONS: list[dict[str, Any]] = [
     # 任务
     _menu("task:view", "任务查看", "/tasks", "CheckSquareOutlined", 120),
     _button("task:create", "任务创建"),
+    # 销售中心 6 模块（PAND-249）
+    _menu("order:view", "订单管理", "/orders", "ShoppingCartOutlined", 140),
+    _button("order:create", "订单创建"),
+    _button("order:update", "订单编辑"),
+    _button("order:status", "订单状态流转"),
+    _button("order:delete", "订单删除"),
+    _menu("sample:view", "样品管理", "/samples", "ExperimentOutlined", 150),
+    _button("sample:create", "样品创建"),
+    _button("sample:update", "样品编辑"),
+    _button("sample:status", "样品状态流转"),
+    _button("sample:delete", "样品删除"),
+    _menu("quote:view", "报价库", "/quote-library", "GoldOutlined", 160),
+    _button("quote:manage", "报价库维护"),
+    _button("quote:delete", "报价库删除"),
+    _menu("feedback:view", "问题反馈", "/feedback", "BugOutlined", 170),
+    _button("feedback:create", "反馈创建"),
+    _button("feedback:handle", "反馈处理"),
+    _button("feedback:delete", "反馈删除"),
     # 集成
     _menu("integration:view", "K3集成日志", "/integrations/k3/logs", "ApiOutlined", 130),
     # 系统设置
@@ -130,6 +153,10 @@ ROLE_TEMPLATES: dict[str, dict[str, Any]] = {
         + _codes("approval")
         + _codes("email")
         + _codes("task")
+        + _codes("order")
+        + _codes("sample")
+        + _codes("quote")
+        + _codes("feedback")
         + _codes("integration")
         + ["audit:view"],
         "scope_type": "ALL",
@@ -148,7 +175,11 @@ ROLE_TEMPLATES: dict[str, dict[str, Any]] = {
         + _codes("quotation")
         + _codes("approval")
         + _codes("email")
-        + _codes("task"),
+        + _codes("task")
+        + _codes("order")
+        + _codes("sample")
+        + _codes("quote")
+        + _codes("feedback"),
         "scope_type": "DEPT_AND_CHILD",
     },
     "sales": {
@@ -187,6 +218,17 @@ ROLE_TEMPLATES: dict[str, dict[str, Any]] = {
             "email:view",
             "email:send",
             "email:sync",
+            "order:view",
+            "order:create",
+            "order:update",
+            "order:status",
+            "sample:view",
+            "sample:create",
+            "sample:update",
+            "sample:status",
+            "quote:view",
+            "feedback:view",
+            "feedback:create",
             "task:view",
             "task:create",
         ],
