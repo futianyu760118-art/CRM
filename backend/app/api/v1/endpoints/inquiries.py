@@ -167,7 +167,7 @@ async def create_inquiry(
         db.add(InquiryItem(inquiry_id=inquiry.id, **item))
     await db.flush()
     await _trim_items_total(db, inquiry)
-    await ebms_sync.emit_upsert(db, "inquiry", inquiry)
+    await ebms_sync.emit_upsert(db, "Inquiry", inquiry)
     await db.commit()
     await db.refresh(inquiry)
     return resp.ok(await _serialize(db, inquiry))
@@ -219,7 +219,7 @@ async def update_inquiry(
         from app.schemas.business import InquiryItemIn
 
         await _replace_items(db, inquiry.id, [InquiryItemIn(**i) for i in items])
-    await ebms_sync.emit_upsert(db, "inquiry", inquiry)
+    await ebms_sync.emit_upsert(db, "Inquiry", inquiry)
     await db.commit()
     await db.refresh(inquiry)
     return resp.ok(await _serialize(db, inquiry))
@@ -245,7 +245,7 @@ async def submit_inquiry(
         if opp is not None and opp.stage in {"REQUIREMENT", "NEW", "QUALIFIED"}:
             opp.stage = "INQUIRY"
             opp.inquiry_id = inquiry.id
-    await ebms_sync.emit_upsert(db, "inquiry", inquiry)
+    await ebms_sync.emit_upsert(db, "Inquiry", inquiry)
     await db.commit()
     await db.refresh(inquiry)
     return resp.ok(await _serialize(db, inquiry))
@@ -260,7 +260,7 @@ async def delete_inquiry(
     inquiry = await get_or_404(db, Inquiry, inquiry_id, "询价单")
     soft_delete(inquiry)
     await db.flush()
-    await ebms_sync.emit_delete(db, "inquiry", inquiry)
+    await ebms_sync.emit_delete(db, "Inquiry", inquiry)
     await db.commit()
     return resp.ok({"deleted": True})
 

@@ -140,7 +140,7 @@ async def create_company(
     await company_code.ensure_primary_code(db, company)
     if company.currency:
         await company_code.add_currency_code(db, company, company.currency)
-    await ebms_sync.emit_upsert(db, "customer", company)
+    await ebms_sync.emit_upsert(db, "Customer", company)
     await db.commit()
     await db.refresh(company)
     items = await _enrich(db, [company])
@@ -223,9 +223,9 @@ async def merge_companies(
         source.status = "MERGED"
         source.remark = f"{source.remark or ''}\n已合并至 {target.code}".strip()
         soft_delete(source)
-        await ebms_sync.emit_delete(db, "customer", source)
+        await ebms_sync.emit_delete(db, "Customer", source)
 
-    await ebms_sync.emit_upsert(db, "customer", target)
+    await ebms_sync.emit_upsert(db, "Customer", target)
     await db.commit()
     return resp.ok(
         CompanyMergeOut(
@@ -359,7 +359,7 @@ async def update_company(
         setattr(company, key, value)
     if new_currency:
         await company_code.add_currency_code(db, company, new_currency)
-    await ebms_sync.emit_upsert(db, "customer", company)
+    await ebms_sync.emit_upsert(db, "Customer", company)
     await db.commit()
     await db.refresh(company)
     items = await _enrich(db, [company])
@@ -374,7 +374,7 @@ async def delete_company(
 ) -> dict[str, Any]:
     company = await _company_or_404(db, company_id)
     soft_delete(company)
-    await ebms_sync.emit_delete(db, "customer", company)
+    await ebms_sync.emit_delete(db, "Customer", company)
     await db.commit()
     return resp.ok({"deleted": True})
 

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, Request
 
@@ -36,13 +37,22 @@ def _verify_inbound_token(request: Request) -> None:
         raise ApiError(ErrCode.UNAUTHORIZED, "入站令牌无效", http_status=401)
 
 
+def _idempotency_key_header(request: Request) -> str | None:
+    """X-Idempotency-Key 头按 RFC 3986 百分号编码承载（对齐 EBMS 出站），解码后返回。"""
+    raw = request.headers.get("X-Idempotency-Key")
+    if not raw:
+        return None
+    return unquote(raw)
+
+
 @router.post("/ingest", summary="入站：消费单条 EBMS 实体事件")
 async def ingest(
     payload: dict[str, Any],
+    request: Request,
     db: DbSession,
     _: None = Depends(_verify_inbound_token),
 ) -> dict[str, Any]:
-    result = await ebms_ingest.ingest_event(db, payload)
+    result = await ebms_ingest.ingest_event(db, payload, _idempotency_key_header(request))
     await db.commit()
     return resp.ok(result)
 

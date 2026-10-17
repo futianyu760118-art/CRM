@@ -16,6 +16,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -109,7 +110,7 @@ class EbmsTransport:
             "Content-Type": "application/json",
             "X-Contract-Version": str(contract.get("contract_version", "")),
             "X-Event-Type": event_type,
-            "X-Idempotency-Key": idempotency_key,
+            "X-Idempotency-Key": quote(idempotency_key, safe=""),
         }
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"

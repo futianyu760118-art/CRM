@@ -276,32 +276,46 @@ def build_exception_contract(
 # canonical = UTF-8、键排序、无空格、金额/数量按十进制字符串（规避浮点漂移）。
 # ---------------------------------------------------------------------------
 
-#: 可同步的对象类型（dictionary 仅 upserted，不产生 deleted）
+#: 可同步的对象类型（PascalCase，契约 §4.1 冻结；dictionary 仅 upserted，不产生 deleted）
 EVENT_OBJECT_TYPES: tuple[str, ...] = (
-    "customer",
-    "inquiry",
-    "quote_library",
-    "order",
-    "sample",
-    "feedback",
-    "dictionary",
+    "Customer",
+    "Inquiry",
+    "QuoteLibrary",
+    "Order",
+    "Sample",
+    "Feedback",
+    "Dictionary",
 )
 
-ENTITY_UPSERT_EVENTS: tuple[str, ...] = tuple(f"{t}.upserted" for t in EVENT_OBJECT_TYPES)
-ENTITY_DELETE_EVENTS: tuple[str, ...] = tuple(f"{t}.deleted" for t in EVENT_OBJECT_TYPES if t != "dictionary")
+#: object_type（PascalCase）→ event_type 前缀（小写，§4.1 冻结 13 事件）
+_OBJECT_EVENT_BASE: dict[str, str] = {
+    "Customer": "customer",
+    "Inquiry": "inquiry",
+    "QuoteLibrary": "quote_library",
+    "Order": "order",
+    "Sample": "sample",
+    "Feedback": "feedback",
+    "Dictionary": "dictionary",
+}
+
+ENTITY_UPSERT_EVENTS: tuple[str, ...] = tuple(f"{_OBJECT_EVENT_BASE[t]}.upserted" for t in EVENT_OBJECT_TYPES)
+ENTITY_DELETE_EVENTS: tuple[str, ...] = tuple(
+    f"{_OBJECT_EVENT_BASE[t]}.deleted" for t in EVENT_OBJECT_TYPES if t != "Dictionary"
+)
 EVENT_TYPES: tuple[str, ...] = ENTITY_UPSERT_EVENTS + ENTITY_DELETE_EVENTS
 
 
 def upsert_event_for(object_type: str) -> str:
-    if object_type not in EVENT_OBJECT_TYPES:
+    base = _OBJECT_EVENT_BASE.get(object_type)
+    if base is None:
         raise ValueError(f"未知对象类型: {object_type!r}")
-    return f"{object_type}.upserted"
+    return f"{base}.upserted"
 
 
 def delete_event_for(object_type: str) -> str:
-    if object_type not in EVENT_OBJECT_TYPES or object_type == "dictionary":
+    if object_type not in EVENT_OBJECT_TYPES or object_type == "Dictionary":
         raise ValueError(f"{object_type!r} 不产生 deleted 事件")
-    return f"{object_type}.deleted"
+    return f"{_OBJECT_EVENT_BASE[object_type]}.deleted"
 
 
 #: 取值域（单一事实来源 = app.domain.state_machine）
@@ -332,16 +346,23 @@ class AeosEventContract(BaseModel):
     source_system: str = Field(min_length=1, max_length=30)
     object_type: str = Field(min_length=1, max_length=50)
     object_id: str = Field(min_length=1, max_length=100)
+    operation: Literal["UPSERT", "DELETE"]
     occurred_at: datetime
     trace_id: str = Field(min_length=1, max_length=100)
     payload: dict[str, Any]
+    #: 幂等键（{target}:{event_type}:{object_id}:{fingerprint}），随报文体下发（EBMS 头/体一致）
+    idempotency_key: str | None = None
 
     @model_validator(mode="after")
     def _validate_enums(self) -> AeosEventContract:
-        if self.event_type not in EVENT_TYPES:
-            raise ValueError(f"event_type 取值越界: {self.event_type!r}")
         if self.object_type not in EVENT_OBJECT_TYPES:
             raise ValueError(f"object_type 取值越界: {self.object_type!r}")
+        if self.event_type not in EVENT_TYPES:
+            raise ValueError(f"event_type 取值越界: {self.event_type!r}")
+        suffix = "upserted" if self.operation == "UPSERT" else "deleted"
+        expected = f"{_OBJECT_EVENT_BASE[self.object_type]}.{suffix}"
+        if self.event_type != expected:
+            raise ValueError(f"event_type 与 object_type/operation 不一致: 期望 {expected!r}, 实际 {self.event_type!r}")
         return self
 
     @property
@@ -356,6 +377,7 @@ def build_event_contract(
     source_system: str,
     object_type: str,
     object_id: str,
+    operation: str,
     payload: Mapping[str, Any],
     trace_id: str,
     occurred_at: datetime,
@@ -369,6 +391,7 @@ def build_event_contract(
             "source_system": source_system,
             "object_type": object_type,
             "object_id": object_id,
+            "operation": operation,
             "occurred_at": occurred_at,
             "trace_id": trace_id,
             "payload": dict(payload),
@@ -376,32 +399,32 @@ def build_event_contract(
     )
 
 
-def _canonicalize(value: Any) -> Any:
-    """规整为稳定可序列化形态：金额/数量 → 十进制字符串，键排序、无空格。"""
+#: 指纹 canonical 时递归剔除的审计时间键（「返工1·契约」§4.1 冻结）
+_FINGERPRINT_EXCLUDE: tuple[str, ...] = ("created_at", "updated_at")
+
+
+def _canonical(value: Any) -> Any:
+    """指纹 canonical：递归键排序、剔除审计时间键、保留 JSON 原生类型（§4.1 冻结）。"""
     if isinstance(value, dict):
-        return {str(k): _canonicalize(v) for k, v in sorted(value.items())}
+        return {
+            str(k): _canonical(v)
+            for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+            if k not in _FINGERPRINT_EXCLUDE
+        }
     if isinstance(value, (list, tuple)):
-        return [_canonicalize(v) for v in value]
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if value is None:
-        return "null"
-    if isinstance(value, float):
-        return format(value, ".4f")
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    return str(value)
+        return [_canonical(v) for v in value]
+    return value
 
 
 def canonical_json(payload: Mapping[str, Any]) -> str:
-    """canonical 序列化：UTF-8、键排序、无空格。"""
-    return json.dumps(_canonicalize(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    """指纹 canonical 序列化：UTF-8、递归键排序、无空格、非 ASCII 原样、JSON 原生类型。"""
+    return json.dumps(_canonical(payload), ensure_ascii=False, separators=(",", ":"))
 
 
 def event_fingerprint(event: Mapping[str, Any]) -> str:
-    """事件内容指纹：排除易变时钟 `occurred_at`。"""
-    stable = {k: v for k, v in event.items() if k != "occurred_at"}
-    return hashlib.sha1(canonical_json(stable).encode("utf-8")).hexdigest()[:16]
+    """事件指纹 = sha1(canonical(payload'))[:16]，只哈希业务内容（不含信封与审计时间）。"""
+    payload = event.get("payload") or {}
+    return hashlib.sha1(canonical_json(payload).encode("utf-8")).hexdigest()[:16]
 
 
 def event_idempotency_key(target_system: str, event: Mapping[str, Any]) -> str:

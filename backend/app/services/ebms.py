@@ -430,19 +430,22 @@ async def emit_entity_event(
       数值变化产生新投递（与试点 A/B 幂等语义一致）。
     - 本函数只负责入队，投递由 Worker/联调端点调用 ``deliver_pending`` 完成。
     """
-    event_type = upsert_event_for(object_type) if action == "upserted" else delete_event_for(object_type)
+    operation = "UPSERT" if action == "upserted" else "DELETE"
+    event_type = upsert_event_for(object_type) if operation == "UPSERT" else delete_event_for(object_type)
     contract = build_event_contract(
         event_id=f"EVT-{SOURCE_SYSTEM}-{uuid.uuid4().hex[:12]}",
         event_type=event_type,
         source_system=SOURCE_SYSTEM,
         object_type=object_type,
         object_id=object_id,
+        operation=operation,
         payload=payload,
         trace_id=f"TRACE-EVT-{SOURCE_SYSTEM}-{object_type}-{object_id}",
         occurred_at=occurred_at or cn_now(),
     )
-    wire = to_wire(contract)
-    key = event_idempotency_key("EBMS", wire)
+    key = event_idempotency_key("EBMS", to_wire(contract))
+    # 幂等键随报文体下发（EBMS aeos-http.js 头/体一致性校验），并作为出站投递的幂等键
+    contract.idempotency_key = key
     _, log, created = await _enqueue(
         db,
         contract=contract,
