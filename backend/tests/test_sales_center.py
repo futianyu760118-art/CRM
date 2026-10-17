@@ -116,9 +116,9 @@ class TestFingerprintAndIdempotency:
         )
 
     def test_canonical_json_sorted_and_no_spaces(self) -> None:
-        # 标量一律字符串化（int → "1"），键排序、无空格
+        # 标量以 JSON 原生字面量参与（int → 1、bool → true、None → null），键排序、无空格
         wire = canonical_json({"b": 1, "a": {"z": 1, "y": 2}})
-        assert wire == '{"a":{"y":"2","z":"1"},"b":"1"}'
+        assert wire == '{"a":{"y":2,"z":1},"b":1}'
         assert " " not in wire
 
     def test_idempotency_key_format(self) -> None:
@@ -128,6 +128,169 @@ class TestFingerprintAndIdempotency:
         assert event_type == "customer.upserted"
         assert object_id == "HJ003-176-576"
         assert len(fp) == 16
+
+
+class TestFingerprintFixtures:
+    """PAND-253 评论 1 勘误值（整包口径）：CRM 与 EBMS 逐字一致，仅 target 段不同。"""
+
+    ORDER_FIXTURE: dict = {
+        "contract_version": "AEOS.Event.V1",
+        "event_id": "EVT-M05-order-SO20261017001#1-a1b2c3d4",
+        "event_type": "order.upserted",
+        "source_system": "M05",
+        "object_type": "Order",
+        "object_id": "SO20261017001#1",
+        "operation": "UPSERT",
+        "occurred_at": "2026-10-17T09:30:00+08:00",
+        "trace_id": "TRACE-EVT-M05-order-SO20261017001#1-a1b2c3d4",
+        "payload": {
+            "order_no": "SO20261017001",
+            "line_no": "1",
+            "customer_name": "宁波恒见光电",
+            "customer_code": "KH0001",
+            "product_code": "P-100",
+            "product_name": "LED 投光灯",
+            "project_no": "PRJ-2026-008",
+            "quantity": "100.00",
+            "completed_qty": "0.00",
+            "order_amount": "15600.00",
+            "status": "confirmed",
+            "risk_level": "blue",
+            "promised_date": "2026-11-01",
+            "plan_date": "2026-10-25",
+            "online_date": "2026-10-28",
+            "user_status_locked": False,
+            "user_status_modified_at": None,
+            "user_status_modified_by": None,
+            "sales_id": 7,
+            "department_id": 2,
+            "create_by": 7,
+            "created_at": "2026-10-17T09:00:00+08:00",
+            "updated_at": "2026-10-17T09:30:00+08:00",
+        },
+    }
+
+    INQUIRY_FIXTURE: dict = {
+        "contract_version": "AEOS.Event.V1",
+        "event_id": "EVT-M05-inquiry-JFX20261017001-9f3e2d1c",
+        "event_type": "inquiry.upserted",
+        "source_system": "M05",
+        "object_type": "Inquiry",
+        "object_id": "JFX20261017001",
+        "operation": "UPSERT",
+        "occurred_at": "2026-10-17T08:15:00+08:00",
+        "trace_id": "TRACE-EVT-M05-inquiry-JFX20261017001-9f3e2d1c",
+        "payload": {
+            "serial_number": "JFX20261017001",
+            "customer_name": "宁波恒见光电",
+            "customer_code": "KH0001",
+            "country_region": "中国",
+            "sales_person": "张三",
+            "contact_person": "李四",
+            "contact_phone": "13800000000",
+            "contact_email": "li@example.com",
+            "inquiry_time": "2026-10-17T08:00:00+08:00",
+            "delivery_date": "2026-11-30",
+            "customer_source": "展会",
+            "quote_validity": "30 天",
+            "status": "pending_quote",
+            "lost_reason": None,
+            "items": [
+                {
+                    "external_model": "AC-100W",
+                    "internal_model": "内部型号A",
+                    "product_name": "LED 投光灯",
+                    "product_category": "投光灯",
+                    "power": "100W",
+                    "configuration": "标配",
+                    "quantity": "500.00",
+                    "target_price": "85.50",
+                    "certificate_compliant": "是",
+                    "certificate_level": "国标",
+                    "input_voltage": "AC220V",
+                    "battery": None,
+                    "color_temp": "6000K",
+                    "luminous_flux": "12000",
+                    "light_source": "LED",
+                    "main_body": "压铸铝",
+                    "lampshade": "钢化玻璃",
+                    "reflector": None,
+                    "cable": "1m",
+                    "switch_type": None,
+                    "usb": None,
+                    "waterproof": "IP65",
+                    "sensor": None,
+                    "quote_time_needed": "15 天",
+                    "custom_requirements": "客户要求防水",
+                    "image": None,
+                },
+                {
+                    "external_model": "AC-200W",
+                    "internal_model": "内部型号B",
+                    "product_name": "LED 投光灯",
+                    "product_category": "投光灯",
+                    "power": "200W",
+                    "configuration": "高配",
+                    "quantity": "200.00",
+                    "target_price": "150.00",
+                    "certificate_compliant": "否",
+                    "certificate_level": "无证书",
+                    "input_voltage": "AC220V",
+                    "battery": None,
+                    "color_temp": "6500K",
+                    "luminous_flux": "24000",
+                    "light_source": "LED",
+                    "main_body": "压铸铝",
+                    "lampshade": "钢化玻璃",
+                    "reflector": None,
+                    "cable": "1m",
+                    "switch_type": None,
+                    "usb": None,
+                    "waterproof": "IP66",
+                    "sensor": None,
+                    "quote_time_needed": "20 天",
+                    "custom_requirements": None,
+                    "image": None,
+                },
+            ],
+            "created_at": "2026-10-17T08:00:00+08:00",
+            "updated_at": "2026-10-17T08:15:00+08:00",
+        },
+    }
+
+    def test_order_fingerprint_matches_errata(self) -> None:
+        assert event_fingerprint(self.ORDER_FIXTURE) == "e44519e77910896a"
+        assert (
+            event_idempotency_key("M05", self.ORDER_FIXTURE)
+            == "M05:order.upserted:SO20261017001#1:e44519e77910896a"
+        )
+        assert (
+            event_idempotency_key("EBMS", self.ORDER_FIXTURE)
+            == "EBMS:order.upserted:SO20261017001#1:e44519e77910896a"
+        )
+
+    def test_inquiry_fingerprint_matches_errata(self) -> None:
+        assert event_fingerprint(self.INQUIRY_FIXTURE) == "6cf954c39baab26c"
+        assert (
+            event_idempotency_key("M05", self.INQUIRY_FIXTURE)
+            == "M05:inquiry.upserted:JFX20261017001:6cf954c39baab26c"
+        )
+        assert (
+            event_idempotency_key("EBMS", self.INQUIRY_FIXTURE)
+            == "EBMS:inquiry.upserted:JFX20261017001:6cf954c39baab26c"
+        )
+
+    def test_fingerprint_ignores_envelope_derived_fields(self) -> None:
+        # 仅改动 occurred_at / event_id / trace_id / idempotency_key 不影响指纹
+        base = self.ORDER_FIXTURE
+        variant = {
+            **base,
+            "event_id": "EVT-DIFFERENT",
+            "trace_id": "TRACE-DIFFERENT",
+            "occurred_at": "2099-01-01T00:00:00+08:00",
+            "idempotency_key": "M05:order.upserted:SO20261017001#1:e44519e77910896a",
+        }
+        assert event_fingerprint(variant) == event_fingerprint(base)
 
 
 # ------------------------------------------------------------------ 状态机

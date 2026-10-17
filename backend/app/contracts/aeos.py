@@ -272,8 +272,8 @@ def build_exception_contract(
 #
 # 契约冻结版 §4：13 种事件 = 6 个业务实体 × {upserted, deleted} + dictionary.upserted。
 # 幂等键 = {target_system}:{event_type}:{object_id}:{fingerprint}；
-# fingerprint = sha1(canonical(event 去掉 occurred_at))[:16]，
-# canonical = UTF-8、键排序、无空格、金额/数量按十进制字符串（规避浮点漂移）。
+# fingerprint = sha1(canonical(event 去掉 occurred_at/event_id/trace_id/idempotency_key))[:16]，
+# canonical = UTF-8、键排序、无空格，标量原样保留（仅 datetime/date 转 ISO 字符串）。
 # ---------------------------------------------------------------------------
 
 #: 可同步的对象类型（dictionary 仅 upserted，不产生 deleted）
@@ -377,20 +377,18 @@ def build_event_contract(
 
 
 def _canonicalize(value: Any) -> Any:
-    """规整为稳定可序列化形态：金额/数量 → 十进制字符串，键排序、无空格。"""
+    """规整为稳定可序列化形态：键排序，datetime/date → ISO 字符串，其余标量原样保留。
+
+    对齐 EBMS 整包口径：bool/None/int/str/float 均以 JSON 原生字面量参与指纹，
+    不做字符串化（避免两侧序列化差异导致指纹不一致）。
+    """
     if isinstance(value, dict):
         return {str(k): _canonicalize(v) for k, v in sorted(value.items())}
     if isinstance(value, (list, tuple)):
         return [_canonicalize(v) for v in value]
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if value is None:
-        return "null"
-    if isinstance(value, float):
-        return format(value, ".4f")
     if isinstance(value, (datetime, date)):
         return value.isoformat()
-    return str(value)
+    return value
 
 
 def canonical_json(payload: Mapping[str, Any]) -> str:
@@ -398,9 +396,13 @@ def canonical_json(payload: Mapping[str, Any]) -> str:
     return json.dumps(_canonicalize(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+#: 指纹计算需剔除的易变/派生字段（对齐 EBMS 整包口径 §4.1）
+_FINGERPRINT_EXCLUDED_FIELDS = frozenset({"occurred_at", "event_id", "trace_id", "idempotency_key"})
+
+
 def event_fingerprint(event: Mapping[str, Any]) -> str:
-    """事件内容指纹：排除易变时钟 `occurred_at`。"""
-    stable = {k: v for k, v in event.items() if k != "occurred_at"}
+    """事件内容指纹：整包口径，剔除 occurred_at / event_id / trace_id / idempotency_key。"""
+    stable = {k: v for k, v in event.items() if k not in _FINGERPRINT_EXCLUDED_FIELDS}
     return hashlib.sha1(canonical_json(stable).encode("utf-8")).hexdigest()[:16]
 
 

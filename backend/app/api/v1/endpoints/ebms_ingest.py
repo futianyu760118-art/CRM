@@ -39,10 +39,13 @@ def _verify_inbound_token(request: Request) -> None:
 @router.post("/ingest", summary="入站：消费单条 EBMS 实体事件")
 async def ingest(
     payload: dict[str, Any],
+    request: Request,
     db: DbSession,
     _: None = Depends(_verify_inbound_token),
 ) -> dict[str, Any]:
-    result = await ebms_ingest.ingest_event(db, payload)
+    # 优先采用发送方 X-Idempotency-Key 头；无则回退事件体/契约重算（见 _resolve_key）
+    header_key = request.headers.get("X-Idempotency-Key")
+    result = await ebms_ingest.ingest_event(db, payload, header_idempotency_key=header_key)
     await db.commit()
     return resp.ok(result)
 

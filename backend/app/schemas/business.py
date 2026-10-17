@@ -168,6 +168,15 @@ class CompanyMergeOut(BaseModel):
     moved_opportunities: int
 
 
+class CompanyBatchUpdateIn(BaseModel):
+    ids: list[uuid.UUID] = Field(min_length=1)
+    fields: dict[str, Any] = Field(min_length=1)
+
+
+class CompanyBatchDeleteIn(BaseModel):
+    ids: list[uuid.UUID] = Field(min_length=1)
+
+
 class DuplicateGroup(BaseModel):
     key: str
     companies: list[CompanyOut]

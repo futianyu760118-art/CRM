@@ -2,8 +2,9 @@
 
 契约冻结版 §5 冲突规则（本模块实现）：
 - OWNER_KEPT ：对象已存在时，入站仅应用 ``EBMS_OWNED_FIELDS``；CRM 拥有字段若被
-  改写，只记录 ``SyncConflict``（resolution=SKIPPED），不改本地值。
-- LOCKED     ：订单 ``user_status_locked`` 时，状态相关变更被拒并留痕。
+  改写，只记录 ``SyncConflict``（resolution=OWNER_KEPT），不改本地值。
+- LOCKED     ：订单 ``user_status_locked`` 时，仅跳过 ``status`` 覆盖并留痕
+  （resolution=LOCKED），其余字段照常按 Owner 规则同步（对齐 EBMS 外部 API）。
 - STALE      ：``occurred_at < last_sync_at`` 的迟到事件被丢弃。
 - DELETE 保护：``sync_status=PENDING``（本地有未同步出站变更）时拒绝删除。
 
@@ -36,6 +37,9 @@ from app.services.number_sequence import next_number
 INBOUND_SYSTEM = "EBMS"
 INBOUND_ACTION = "EVENT_INGEST"
 LOG_SUCCESS = "SUCCESS"
+
+#: EBMS→CRM 入站幂等键 target 段（契约 §4.1：CRM→EBMS 用 EBMS，EBMS→CRM 用 M05）
+INBOUND_TARGET = "M05"
 
 #: 创建时需转 UUID 的外键/归属列
 _UUID_COLUMNS = {
@@ -98,6 +102,8 @@ def _record_conflict(
     key: str,
     incoming: Any,
     local: Any,
+    *,
+    resolution: str = "OWNER_KEPT",
 ) -> dict[str, Any]:
     row = SyncConflict(
         object_type=object_type,
@@ -106,13 +112,13 @@ def _record_conflict(
         source_system=contract.source_system,
         incoming_value={"value": incoming},
         local_value={"value": local},
-        resolution="SKIPPED",
+        resolution=resolution,
         event_id=contract.event_id,
         idempotency_key=key,
         occurred_at=contract.occurred_at,
     )
     db.add(row)
-    return {"field": field, "resolution": "OWNER_KEPT", "local": local, "incoming": incoming}
+    return {"field": field, "resolution": resolution, "local": local, "incoming": incoming}
 
 
 async def _find_object(db: AsyncSession, object_type: str, payload: dict[str, Any]) -> Any | None:
@@ -244,15 +250,30 @@ async def _apply_object(
     if last_sync and contract.occurred_at < last_sync:
         return {"object_type": object_type, "object_id": contract.object_id, "action": "skipped", "reason": "stale"}
 
-    # LOCKED：订单用户锁定
-    if object_type == "order" and getattr(obj, "user_status_locked", False):
-        return {"object_type": object_type, "object_id": contract.object_id, "action": "skipped", "reason": "locked"}
+    # LOCKED：订单用户锁定 → 仅跳过 status 覆盖（其余字段照常按 Owner 规则同步），并留痕 resolution=LOCKED
+    locked_status = object_type == "order" and getattr(obj, "user_status_locked", False)
 
     owned = EBMS_OWNED_FIELDS.get(object_type, set())
     conflicts: list[dict[str, Any]] = []
     applied = 0
     for field, value in payload.items():
         if field == "id" or not hasattr(obj, field) or value is None:
+            continue
+        if locked_status and field == "status":
+            if _differs(getattr(obj, field), value):
+                conflicts.append(
+                    _record_conflict(
+                        db,
+                        object_type,
+                        obj,
+                        field,
+                        contract,
+                        key,
+                        value,
+                        _ser(getattr(obj, field)),
+                        resolution="LOCKED",
+                    )
+                )
             continue
         if field in owned:
             coerced = _coerce(field, value)
@@ -292,17 +313,32 @@ async def _find_ingest_log(db: AsyncSession, key: str) -> IntegrationLog | None:
     ).scalar_one_or_none()
 
 
-async def ingest_event(db: AsyncSession, event: Mapping[str, Any]) -> dict[str, Any]:
+def _resolve_key(contract: AeosEventContract, wire: Mapping[str, Any], header_key: str | None = None) -> str:
+    """解析入站幂等键：请求头 X-Idempotency-Key → 事件体 idempotency_key → 契约重算回退。
+
+    无头/体键时按 EBMS→CRM 出站同规则重算（target=M05 + 整包指纹），保证两侧写入的
+    idempotency_key 逐字一致，用于幂等去重与对账。
+    """
+    body_key = wire.get("idempotency_key")
+    for candidate in (header_key, body_key):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return event_idempotency_key(INBOUND_TARGET, wire)
+
+
+async def ingest_event(
+    db: AsyncSession, event: Mapping[str, Any], *, header_idempotency_key: str | None = None
+) -> dict[str, Any]:
     """消费一条 EBMS 事件：校验 → 幂等 → 应用 → 记日志。
 
-    幂等键 = ``CRM:{event_type}:{object_id}:{fingerprint}``；同内容重复投递直接返回 duplicate。
+    幂等键 = ``M05:{event_type}:{object_id}:{fingerprint}``；同内容重复投递直接返回 duplicate。
     契约校验失败抛 ``ContractValidationError``（HTTP 422）。
     """
     contract = validate_contract(event)
     if not isinstance(contract, AeosEventContract):
         raise ContractValidationError(f"期望 AEOS.Event.V1，实际 {contract.contract_version}")
     wire = to_wire(contract)
-    key = event_idempotency_key("CRM", wire)
+    key = _resolve_key(contract, wire, header_idempotency_key)
 
     existing = await _find_ingest_log(db, key)
     if existing is not None and existing.status == LOG_SUCCESS:

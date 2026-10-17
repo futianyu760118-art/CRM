@@ -72,7 +72,7 @@ async def list_feedback(
     return resp.page([_enrich(r) for r in rows], total, page, page_size)
 
 
-@router.get("/stats", summary="反馈统计（按类型/优先级/状态）")
+@router.get("/stats", summary="反馈统计（按类型/优先级/状态 + 平均处理时长）")
 async def feedback_stats(
     db: DbSession,
     _: User = Depends(require_permission("feedback:view")),
@@ -83,8 +83,28 @@ async def feedback_stats(
         ).all()
         return {str(k): int(c) for k, c in rows}
 
+    total = int((await db.execute(select(func.count()).where(Feedback.deleted_at.is_(None)))).scalar_one())
+
+    # 平均处理时长（小时）：创建到 resolved/closed，保留 1 位小数；无已处理样本返回 0（除零保护）
+    handle_rows = (
+        await db.execute(
+            select(Feedback.created_at, Feedback.resolved_at).where(
+                Feedback.deleted_at.is_(None), Feedback.resolved_at.isnot(None)
+            )
+        )
+    ).all()
+    handle_seconds = 0.0
+    handle_count = 0
+    for created_at, resolved_at in handle_rows:
+        if created_at is not None and resolved_at is not None and resolved_at >= created_at:
+            handle_seconds += (resolved_at - created_at).total_seconds()
+            handle_count += 1
+    avg_handle_hours = round(handle_seconds / handle_count / 3600, 1) if handle_count else 0.0
+
     return resp.ok(
         {
+            "total": total,
+            "avg_handle_hours": avg_handle_hours,
             "by_type": await _group(Feedback.type),
             "by_priority": await _group(Feedback.priority),
             "by_status": await _group(Feedback.status),
@@ -247,6 +267,20 @@ async def delete_feedback(
 ) -> dict[str, Any]:
     row = await get_or_404(db, Feedback, feedback_id, "问题反馈")
     soft_delete(row)
+    # 级联软删跟进记录（AC-M6.6：不残留 deleted_at IS NULL 的孤儿跟进）
+    followups = (
+        (
+            await db.execute(
+                select(FeedbackFollowup).where(
+                    FeedbackFollowup.feedback_id == row.id, FeedbackFollowup.deleted_at.is_(None)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for followup in followups:
+        soft_delete(followup)
     await db.flush()
     await ebms_sync.emit_delete(db, "feedback", row)
     await db.commit()
