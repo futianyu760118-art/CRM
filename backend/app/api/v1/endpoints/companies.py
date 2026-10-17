@@ -204,32 +204,94 @@ async def next_code_preview(
     )
 
 
+def _duplicate_group(key: str, kind: str, suspected: bool, rows: list[Company]) -> dict[str, Any]:
+    return {
+        "key": key,
+        "kind": kind,
+        "suspected": suspected,
+        "companies": rows,
+    }
+
+
+def _detect_duplicates(companies: list[Company], contacts: list[Contact]) -> list[dict[str, Any]]:
+    """16-15=B 客户查重：名称精确匹配 + 电话/税号任一命中即提示疑似（人工确认）。
+
+    - 名称：大小写不敏感、去首尾空格的精确匹配，命中即确定重复。
+    - 税号 / 联系人电话/手机：任一命中即「疑似」，交由人工合并确认。
+
+    返回 `{key, kind, suspected, companies}` 列表；`companies` 为 Company 模型对象列表。
+    """
+    groups: list[dict[str, Any]] = []
+
+    by_name: dict[str, list[Company]] = {}
+    for c in companies:
+        key = (c.name or "").strip().lower()
+        if key:
+            by_name.setdefault(key, []).append(c)
+    for _key, rows in by_name.items():
+        if len(rows) > 1:
+            groups.append(_duplicate_group(f"名称:{rows[0].name}", "name", False, rows))
+
+    by_tax: dict[str, list[Company]] = {}
+    for c in companies:
+        tax = (c.tax_id or "").strip()
+        if tax:
+            by_tax.setdefault(tax, []).append(c)
+    for tax, rows in by_tax.items():
+        if len(rows) > 1:
+            groups.append(_duplicate_group(f"税号:{tax}", "tax_id", True, rows))
+
+    company_by_id = {c.id: c for c in companies}
+    phone_to_ids: dict[str, set[uuid.UUID]] = {}
+    for ct in contacts:
+        if ct.company_id is None:
+            continue
+        for phone in (ct.phone, ct.mobile):
+            p = (phone or "").strip()
+            if p:
+                phone_to_ids.setdefault(p, set()).add(ct.company_id)
+    for phone, ids in phone_to_ids.items():
+        rows = [company_by_id[i] for i in ids if i in company_by_id]
+        if len(rows) > 1:
+            groups.append(_duplicate_group(f"电话:{phone}", "phone", True, rows))
+
+    return groups
+
+
 @router.get("/duplicates", summary="客户重复检测")
 async def duplicates(
     db: DbSession,
     _: User = Depends(require_permission("customer:view")),
 ) -> dict[str, Any]:
-    groups = (
-        await db.execute(
-            select(Company.name, func.count().label("cnt"))
-            .where(Company.deleted_at.is_(None))
-            .group_by(Company.name)
-            .having(func.count() > 1)
+    companies = list(
+        (
+            await db.execute(select(Company).where(Company.deleted_at.is_(None)).order_by(Company.created_at))
         )
-    ).all()
-    result = []
-    for name, _cnt in groups:
-        rows = (
-            (await db.execute(select(Company).where(Company.name == name, Company.deleted_at.is_(None))))
+        .scalars()
+        .all()
+    )
+    company_ids = [c.id for c in companies]
+    contacts = (
+        list(
+            (
+                await db.execute(
+                    select(Contact).where(
+                        Contact.deleted_at.is_(None),
+                        Contact.company_id.in_(company_ids),
+                    )
+                )
+            )
             .scalars()
             .all()
         )
-        result.append(
-            {
-                "key": name,
-                "companies": [CompanyOut.model_validate(r).model_dump(mode="json") for r in rows],
-            }
-        )
+        if company_ids
+        else []
+    )
+    groups = _detect_duplicates(companies, contacts)
+    result = [
+        {**g, "companies": [CompanyOut.model_validate(r).model_dump(mode="json") for r in g["companies"]]}
+        for g in groups
+    ]
     return resp.ok(result)
 
 
@@ -322,7 +384,7 @@ async def batch_delete_companies(
     return resp.ok({"deleted": deleted, "requested": len(payload.ids)})
 
 
-@router.post("/import-xlsx", summary="Excel 批量导入客户（按名称去重，同一文件重复导入不产生重复）")
+@router.post("/import-xlsx", summary="Excel 批量导入客户（按名称+税号去重，同一文件重复导入不产生重复）")
 async def import_companies_xlsx(
     db: DbSession,
     file: UploadFile = File(...),
@@ -351,11 +413,21 @@ async def import_companies_xlsx(
         ).all()
         if name
     }
+    existing_tax_ids = {
+        tax.strip().lower()
+        for (tax,) in (
+            await db.execute(
+                select(Company.tax_id).where(Company.deleted_at.is_(None), Company.tax_id.is_not(None))
+            )
+        ).all()
+        if tax and tax.strip()
+    }
 
     imported = 0
     skipped = 0
     results: list[dict[str, Any]] = []
     seen_names: set[str] = set()
+    seen_tax_ids: set[str] = set()
     for line_no, row in enumerate(rows[1:], start=2):
         if not row:
             continue
@@ -374,6 +446,11 @@ async def import_companies_xlsx(
             skipped += 1
             results.append({"row": line_no, "name": name, "status": "skipped", "reason": "客户名称已存在"})
             continue
+        tax_id = (fields.get("tax_id") or "").strip()
+        if tax_id and (tax_id.lower() in existing_tax_ids or tax_id.lower() in seen_tax_ids):
+            skipped += 1
+            results.append({"row": line_no, "name": name, "status": "skipped", "reason": "税号已存在（疑似重复）"})
+            continue
 
         code, owner_seq, global_seq = await company_code.next_company_code(current)
         company = Company(
@@ -390,6 +467,8 @@ async def import_companies_xlsx(
         await company_code.ensure_primary_code(db, company)
         await ebms_sync.emit_upsert(db, "Customer", company)
         seen_names.add(normalized)
+        if tax_id:
+            seen_tax_ids.add(tax_id.lower())
         imported += 1
         results.append({"row": line_no, "name": name, "status": "imported"})
 

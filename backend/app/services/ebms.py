@@ -40,6 +40,7 @@ from app.core.exceptions import ApiError, NotFoundError
 from app.db.base import utcnow
 from app.models.integration import IntegrationLog, IntegrationOutbox
 from app.models.pricing import Quotation
+from app.models.sales import SalesOrder
 from app.services.ebms_transport import DeliveryResult, EbmsTransport
 
 # 契约源系统：CRM = M05 销售自治（EBMS/docs/AEOS_V7.2_DATA_OWNERSHIP_V1.md）
@@ -79,8 +80,16 @@ METRIC_SPECS: dict[str, tuple[str, str]] = {
     "avg_order_amount": ("currency", "M05-AVG-ORDER-AMOUNT-V1"),
 }
 
-#: 试点 B 视为「在途订单」的报价状态
-IN_FLIGHT_ORDER_STATUSES: tuple[str, ...] = ("APPROVED", "SENT", "ACCEPTED")
+#: 试点 B 交付逾期适用的订单状态：未达「已发货」的推进态（AC-M4.5 / 16-06=B）
+DELIVERY_OVERDUE_STATUSES: tuple[str, ...] = (
+    "open",
+    "confirmed",
+    "procurement_ready",
+    "material_ready",
+    "packaging_done",
+)
+#: 无承诺交期时的兜底 SLA 天数（16-06=B：代理规则仅作无交期兜底）
+DEFAULT_DELIVERY_SLA_DAYS = 7
 #: 逾期天数 -> severity（自高到低匹配）
 SEVERITY_THRESHOLDS: tuple[tuple[int, str], ...] = ((30, "critical"), (14, "high"), (7, "medium"), (0, "low"))
 REASON_DELIVERY_OVERDUE = "DELIVERY_OVERDUE"
@@ -323,22 +332,40 @@ def _severity_for(days_overdue: int) -> str:
     return SEVERITY_THRESHOLDS[-1][1]
 
 
+def _overdue_days(
+    promised_date: date | None, created_at: datetime | None, as_of: datetime, sla_days: int
+) -> tuple[int, str] | None:
+    """按 16-06=B 口径判定交付逾期，返回 (days_overdue, basis)；未逾期返回 None。
+
+    - 有 ``promised_date``：以承诺交期为准，``promised_date < as_of 当日`` 即逾期（对齐 AC-M4.5）。
+    - 无 ``promised_date``：回退代理规则 ``业务时间(created_at) + sla_days < as_of``（sla_days 默认 7）。
+    """
+    if promised_date is not None:
+        if promised_date >= as_of.date():
+            return None
+        return max((as_of.date() - promised_date).days, 1), "promised_date"
+    if created_at is None:
+        return None
+    ts = created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=UTC)
+    if ts >= as_of - timedelta(days=sla_days):
+        return None
+    return max((as_of - ts).days - sla_days, 1), "sla"
+
+
 async def emit_delivery_overdue(
     db: AsyncSession,
     *,
-    sla_days: int = 30,
+    sla_days: int = DEFAULT_DELIVERY_SLA_DAYS,
     as_of: datetime | None = None,
     statuses: tuple[str, ...] | None = None,
     limit: int = 200,
 ) -> dict[str, Any]:
     """把在途订单的交付逾期构造成 `AEOS.Exception.V1` 并入库投递队列。
 
-    口径与边界（重要）：
-    - EBMS `AEOS_V7.2_DATA_OWNERSHIP_V1.md` 将 Delivery Order / Schedule 的 Owner 定为
-      **M06 交付自治**；CRM 仅拥有 Sales Order 商务状态。CRM 无交付事实数据，因此本试点
-      以**显式、可调**的 SLA 代理口径判定逾期：`业务时间 + sla_days < as_of` 即视为逾期。
-    - 该判据是联调期的代理规则，不代表交付事实；待 M06 正式 Delivery 数据接入后应改由 M06 产出。
-    - `object_type` 取 `SalesOrder`（CRM 实际拥有的对象），而非基线样例的 `DeliveryOrder`。
+    口径（16-06=B，签批回调）：
+    - 以承诺交期 `promised_date` 为准：`promised_date < as_of 当日` 即视为逾期（对齐 AC-M4.5）。
+    - 无 `promised_date` 时回退代理规则：业务时间(created_at) + sla_days < as_of；`sla_days` 默认 7。
+    - 对象取 `SalesOrder`（CRM 实际拥有的订单对象），状态取「未达已发货」的推进态。
     """
     if sla_days < 0:
         raise ApiError(ErrCode.PARAM_ERROR, "sla_days 不得为负")
@@ -346,51 +373,63 @@ async def emit_delivery_overdue(
     as_of = as_of or cn_now()
     if as_of.tzinfo is None:
         as_of = as_of.replace(tzinfo=CN_TZ)
-    statuses = statuses or IN_FLIGHT_ORDER_STATUSES
-    deadline = as_of - timedelta(days=sla_days)
-    order_ts = _order_timestamp()
+    statuses = statuses or DELIVERY_OVERDUE_STATUSES
 
     rows = (
         await db.execute(
-            select(Quotation.id, Quotation.quotation_no, order_ts)
+            select(SalesOrder.id, SalesOrder.order_no, SalesOrder.promised_date, SalesOrder.created_at)
             .where(
-                Quotation.deleted_at.is_(None),
-                Quotation.status.in_(statuses),
-                order_ts < deadline,
+                SalesOrder.deleted_at.is_(None),
+                SalesOrder.status.in_(statuses),
             )
-            .order_by(order_ts)
+            .order_by(SalesOrder.created_at)
             .limit(limit)
         )
     ).all()
 
     emitted: list[dict[str, Any]] = []
     created_count = 0
-    for qid, quotation_no, ts in rows:
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=UTC)
-        days_overdue = max((as_of - ts).days - sla_days, 1)
+    overdue_count = 0
+    for oid, order_no, promised_date, created_at in rows:
+        verdict = _overdue_days(promised_date, created_at, as_of, sla_days)
+        if verdict is None:
+            continue
+        days_overdue, basis = verdict
+        overdue_count += 1
+        deadline = (
+            as_of.date() - timedelta(days=days_overdue)
+            if basis == "promised_date"
+            else as_of - timedelta(days=sla_days)
+        )
         contract = build_exception_contract(
-            exception_id=f"EXC-{SOURCE_SYSTEM}-{quotation_no}",
+            exception_id=f"EXC-{SOURCE_SYSTEM}-{order_no}",
             source_system=SOURCE_SYSTEM,
             object_type="SalesOrder",
-            object_id=quotation_no,
+            object_id=order_no,
             severity=_severity_for(days_overdue),
             reason_code=REASON_DELIVERY_OVERDUE,
-            evidence_ids=[str(qid)],
-            trace_id=f"TRACE-EXC-{SOURCE_SYSTEM}-{quotation_no}",
+            evidence_ids=[str(oid)],
+            trace_id=f"TRACE-EXC-{SOURCE_SYSTEM}-{order_no}",
             occurred_at=cn_now(),
-            extra={"days_overdue": days_overdue, "sla_days": sla_days, "deadline": deadline.isoformat()},
+            extra={
+                "days_overdue": days_overdue,
+                "basis": basis,
+                "sla_days": sla_days,
+                "promised_date": promised_date.isoformat() if promised_date else None,
+                "deadline": deadline.isoformat(),
+            },
         )
         _, log, created = await _enqueue(
-            db, contract=contract, event_type=EVENT_EXCEPTION, biz_type="QUOTATION", biz_id=qid
+            db, contract=contract, event_type=EVENT_EXCEPTION, biz_type="ORDER", biz_id=oid
         )
         created_count += int(created)
         emitted.append(
             {
                 "contract_id": contract.contract_id,
-                "object_id": quotation_no,
+                "object_id": order_no,
                 "severity": contract.severity,
                 "days_overdue": days_overdue,
+                "basis": basis,
                 "created": created,
                 "log_id": str(log.id) if log else None,
             }
@@ -403,9 +442,9 @@ async def emit_delivery_overdue(
         "reason_code": REASON_DELIVERY_OVERDUE,
         "sla_days": sla_days,
         "as_of": as_of.isoformat(),
-        "total": len(rows),
+        "total": overdue_count,
         "created": created_count,
-        "skipped": len(rows) - created_count,
+        "skipped": overdue_count - created_count,
         "emitted": emitted,
     }
 

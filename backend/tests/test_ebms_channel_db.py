@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.models.business import Company
 from app.models.integration import IntegrationLog, IntegrationOutbox
 from app.models.pricing import Quotation
+from app.models.sales import SalesOrder
 from app.services import ebms
 from app.services.ebms_transport import EbmsTransport
 
@@ -45,6 +46,7 @@ async def _clean(session) -> None:
         delete(IntegrationOutbox).where(IntegrationOutbox.event_type.in_((ebms.EVENT_RESULT, ebms.EVENT_EXCEPTION)))
     )
     await session.execute(delete(Quotation).where(Quotation.quotation_no.like(f"{CODE_PREFIX}%")))
+    await session.execute(delete(SalesOrder).where(SalesOrder.order_no.like(f"{CODE_PREFIX}%")))
     await session.execute(delete(Company).where(Company.code.like(f"{CODE_PREFIX}%")))
     await session.flush()
 
@@ -88,6 +90,28 @@ async def _seed_quotation(
     session.add(quotation)
     await session.flush()
     return quotation
+
+
+async def _seed_sales_order(
+    session,
+    *,
+    status: str = "open",
+    promised_date: date | None = None,
+    created_at: datetime | None = None,
+) -> SalesOrder:
+    """16-06=B：交付逾期取 SalesOrder。有 promised_date 走交期口径，无则回退 created_at + sla。"""
+    order = SalesOrder(
+        order_no=f"{CODE_PREFIX}{uuid.uuid4().hex[:8]}",
+        line_no="1",
+        customer_name="PAND163 联调订单",
+        status=status,
+        promised_date=promised_date,
+    )
+    if created_at is not None:
+        order.created_at = created_at
+    session.add(order)
+    await session.flush()
+    return order
 
 
 async def _ebms_logs(session) -> list[IntegrationLog]:
@@ -234,10 +258,10 @@ class TestIdempotency:
 
 class TestPilotBDeliveryOverdue:
     async def test_overdue_order_emits_exception_with_severity(self, session) -> None:
-        company = await _seed_company(session)
-        # 业务时间 2026-08-08 20:00+08；as_of 2026-10-07 12:00+08 → 相差 60 天
-        overdue = await _seed_quotation(session, company, approved_at=OVERDUE_AT)
-        fresh = await _seed_quotation(session, company, approved_at=AS_OF)
+        # 16-06=B：无 promised_date 时回退 created_at + sla；业务时间 2026-08-08 12:00+08，
+        # as_of 2026-10-07 12:00+08 → 相差 60 天，60-45=15 天 → high
+        overdue = await _seed_sales_order(session, created_at=OVERDUE_AT)
+        fresh = await _seed_sales_order(session, created_at=AS_OF)
 
         out = await ebms.emit_delivery_overdue(session, sla_days=45, as_of=AS_OF)
 
@@ -255,23 +279,42 @@ class TestPilotBDeliveryOverdue:
         assert contract["reason_code"] == "DELIVERY_OVERDUE"
         assert contract["status"] == "OPEN"
         # 异常指向逾期订单，而非未到期的 fresh 订单
-        assert contract["object_id"] == overdue.quotation_no
-        assert contract["object_id"] != fresh.quotation_no
-        assert contract["exception_id"] == f"EXC-M05-{overdue.quotation_no}"
+        assert contract["object_id"] == overdue.order_no
+        assert contract["object_id"] != fresh.order_no
+        assert contract["exception_id"] == f"EXC-M05-{overdue.order_no}"
         assert contract["evidence_ids"] == [str(overdue.id)]
         assert contract["sla_days"] == 45
         assert contract["days_overdue"] == 15
+        assert contract["basis"] == "sla"
+
+    async def test_promised_date_takes_priority_over_sla(self, session) -> None:
+        # 16-06=B 主口径：有 promised_date 即按交期判定，即使 created_at 很新（未超 sla）。
+        overdue = await _seed_sales_order(
+            session, promised_date=AS_OF.date() - timedelta(days=5), created_at=AS_OF
+        )
+        out = await ebms.emit_delivery_overdue(session, sla_days=45, as_of=AS_OF)
+        assert out["total"] == 1
+        assert out["emitted"][0]["days_overdue"] == 5
+        assert out["emitted"][0]["basis"] == "promised_date"
+        assert out["emitted"][0]["severity"] == "low"
+
+        log = (await _ebms_logs(session))[0]
+        assert log.request_payload["object_id"] == overdue.order_no
+
+    async def test_promised_date_not_yet_due_is_ignored(self, session) -> None:
+        # promised_date 未到 as_of 当日（未来交期）→ 不判定逾期。
+        await _seed_sales_order(session, promised_date=AS_OF.date() + timedelta(days=3))
+        out = await ebms.emit_delivery_overdue(session, sla_days=7, as_of=AS_OF)
+        assert out["total"] == 0
 
     async def test_severity_escalates_to_critical(self, session) -> None:
-        company = await _seed_company(session)
-        await _seed_quotation(session, company, approved_at=OVERDUE_AT)
+        await _seed_sales_order(session, created_at=OVERDUE_AT)
         out = await ebms.emit_delivery_overdue(session, sla_days=30, as_of=AS_OF)
         assert out["emitted"][0]["days_overdue"] == 30
         assert out["emitted"][0]["severity"] == "critical"
 
     async def test_repeated_emit_same_day_is_idempotent(self, session) -> None:
-        company = await _seed_company(session)
-        await _seed_quotation(session, company, approved_at=OVERDUE_AT)
+        await _seed_sales_order(session, created_at=OVERDUE_AT)
         first = await ebms.emit_delivery_overdue(session, sla_days=45, as_of=AS_OF)
         second = await ebms.emit_delivery_overdue(session, sla_days=45, as_of=AS_OF)
         assert first["created"] == 1
@@ -279,8 +322,7 @@ class TestPilotBDeliveryOverdue:
         assert await _outbox_count(session, ebms.EVENT_EXCEPTION) == 1
 
     async def test_no_overdue_when_all_within_sla(self, session) -> None:
-        company = await _seed_company(session)
-        await _seed_quotation(session, company, approved_at=AS_OF - timedelta(days=3))
+        await _seed_sales_order(session, created_at=AS_OF - timedelta(days=3))
         out = await ebms.emit_delivery_overdue(session, sla_days=45, as_of=AS_OF)
         assert out["total"] == 0
 
@@ -410,7 +452,7 @@ class TestReconcile:
         company = await _seed_company(session)
         today = date(2026, 10, 7)
         await _seed_quotation(session, company, amount=100.0, approved_at=datetime(2026, 10, 7, 10, 0, tzinfo=UTC))
-        await _seed_quotation(session, company, approved_at=OVERDUE_AT)
+        await _seed_sales_order(session, created_at=OVERDUE_AT)
         await ebms.emit_sales_result(session, period_start=today, period_end=today)
         await ebms.emit_delivery_overdue(session, sla_days=45, as_of=AS_OF)
         await ebms.deliver_pending(session, transport=EbmsTransport(mode="spool", spool_dir=str(tmp_path)))
