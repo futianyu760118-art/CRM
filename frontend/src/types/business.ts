@@ -291,10 +291,14 @@ export interface Pricing {
   customization_cost: number | null;
   moq_cost: number | null;
   other_cost: number | null;
+  loss_cost: number | null;
   total_cost: number | null;
+  base_cost: number | null;
   target_margin: number | null;
+  discount_rate: number | null;
   floor_price: number | null;
   suggested_price: number | null;
+  final_price: number | null;
   can_view_cost?: boolean;
   can_view_floor?: boolean;
   remark: string | null;
@@ -351,6 +355,7 @@ export interface Quotation {
   version: number;
   currency: string;
   exchange_rate: number;
+  discount_rate: number | null;
   incoterm: string | null;
   payment_terms: string | null;
   warranty: string | null;
@@ -409,6 +414,7 @@ export interface Approval {
   applicant_id: string | null;
   applicant_name: string | null;
   amount: number | null;
+  discount_rate: number | null;
   currency: string;
   finished_at: string | null;
   created_at: string;

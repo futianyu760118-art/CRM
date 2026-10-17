@@ -1,8 +1,11 @@
 """审批流引擎（M4）。
 
-流程定义：按业务类型与金额决定审批步骤（角色链）。
-- 报价审批：金额 <= 阈值 → [manager]；> 阈值 → [manager, boss]
-- 核价审批：> 阈值 → [manager, boss]；否则 [manager]
+M2.6 口径（签批 D1~D4=A）：
+- 审批触发：折扣率单条件三档 —— ``discount_rate=1`` 免审、``[0.95,1)`` 经理、
+  ``<0.95`` 总监（阈值含等号，0.95 归经理档）。
+- 层级映射：经理 → ``manager``、总监 → ``boss``（两档）。
+- 折扣率定义：``∈(0,1]``，相对「标准价」= ``base_cost × (1 + profit_rate)``。
+- 未批行为：未批不得生成/导出报价单，仅可保存核价草稿。
 """
 
 from __future__ import annotations
@@ -18,21 +21,23 @@ from app.db.base import utcnow
 from app.models.pricing import ApprovalInstance, ApprovalLog, ApprovalTask
 from app.models.user import User
 
-AMOUNT_THRESHOLD = 50000.0
-
-FLOWS: dict[str, list[str]] = {
-    "QUOTATION": ["manager", "boss"],
-    "PRICING": ["manager", "boss"],
-}
+DISCOUNT_FREE = 1.0
+DISCOUNT_MANAGER_THRESHOLD = 0.95
 
 
-def steps_for(biz_type: str, amount: float | None) -> list[str]:
-    steps = FLOWS.get(biz_type, ["manager"])
-    if amount is not None and amount <= AMOUNT_THRESHOLD:
-        return steps[:1]
-    if amount is None:
-        return steps[:1]
-    return steps
+def steps_for(biz_type: str, discount_rate: float | None) -> list[str]:
+    """按折扣率返回审批角色链。
+
+    - ``=1`` → ``[]``（免审）
+    - ``[0.95, 1)`` → ``["manager"]``（经理）
+    - ``<0.95`` → ``["boss"]``（总监）
+    """
+    dr = float(discount_rate) if discount_rate is not None else DISCOUNT_FREE
+    if dr >= DISCOUNT_FREE:
+        return []
+    if dr >= DISCOUNT_MANAGER_THRESHOLD:
+        return ["manager"]
+    return ["boss"]
 
 
 async def start(
@@ -45,6 +50,7 @@ async def start(
     amount: float | None,
     currency: str,
     applicant: User,
+    discount_rate: float | None = None,
 ) -> ApprovalInstance:
     existing = (
         await db.execute(
@@ -59,7 +65,10 @@ async def start(
     if existing is not None:
         raise ConflictError("该单据已存在进行中的审批")
 
-    steps = steps_for(biz_type, amount)
+    steps = steps_for(biz_type, discount_rate)
+    if not steps:
+        raise ConflictError("该折扣率无需审批（免审）")
+
     instance = ApprovalInstance(
         biz_type=biz_type,
         biz_id=biz_id,
@@ -70,6 +79,7 @@ async def start(
         total_steps=len(steps),
         applicant_id=applicant.id,
         amount=amount,
+        discount_rate=float(discount_rate) if discount_rate is not None else None,
         currency=currency,
     )
     db.add(instance)

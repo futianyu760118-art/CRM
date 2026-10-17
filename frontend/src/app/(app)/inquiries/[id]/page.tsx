@@ -47,6 +47,7 @@ const COST_FIELDS: { name: string; label: string }[] = [
   { name: 'customization_cost', label: '定制费' },
   { name: 'moq_cost', label: '起订量成本' },
   { name: 'other_cost', label: '其他成本' },
+  { name: 'loss_cost', label: '损耗成本' },
 ];
 
 function downloadWithAuth(url: string, filename: string, token: string | null) {
@@ -156,6 +157,7 @@ export default function InquiryDetailPage() {
         inquiry_id: id,
         currency: inquiry.data?.currency ?? 'RMB',
         target_margin: values.target_margin,
+        discount_rate: values.discount_rate,
         costs,
       });
     },
@@ -376,10 +378,16 @@ export default function InquiryDetailPage() {
               render: (v: number | null) => (v === null ? '***' : formatNumber(v, 4)),
             },
             {
-              title: '建议价',
-              dataIndex: 'suggested_price',
+              title: '最终价',
+              dataIndex: 'final_price',
               width: 110,
-              render: (v: number | null) => formatNumber(v, 4),
+              render: (v: number | null) => formatNumber(v, 2),
+            },
+            {
+              title: '折扣率',
+              dataIndex: 'discount_rate',
+              width: 90,
+              render: (v: number | null) => (v == null ? '1' : String(v)),
             },
             {
               title: '操作',
@@ -410,7 +418,12 @@ export default function InquiryDetailPage() {
         width={720}
         destroyOnClose
       >
-        <Form form={form} layout="vertical" initialValues={{ target_margin: 0.22 }} onFinish={(v) => createPricing.mutate(v)}>
+        <Form
+          form={form}
+          layout="vertical"
+          initialValues={{ target_margin: 0.2, discount_rate: 1 }}
+          onFinish={(v) => createPricing.mutate(v)}
+        >
           <Row gutter={12}>
             {COST_FIELDS.map((f) => (
               <Col span={6} key={f.name}>
@@ -420,13 +433,18 @@ export default function InquiryDetailPage() {
               </Col>
             ))}
             <Col span={8}>
-              <Form.Item name="target_margin" label="目标利润率（0.22 = 22%）">
+              <Form.Item name="target_margin" label="目标利润率（0.2 = 20%）">
                 <InputNumber style={{ width: '100%' }} min={0} max={5} step={0.01} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="discount_rate" label="折扣率（∈(0,1]）">
+                <InputNumber style={{ width: '100%' }} min={0.0001} max={1} step={0.01} />
               </Form.Item>
             </Col>
           </Row>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            单位成本 = 总成本 / 明细数量合计；建议价 = 底价 × (1 + 目标利润率) × 规则系数
+            底价 = 单位成本（零利润底线）；最终价 = 总成本 × (1 + 利润率) × 折扣率；折扣率 &lt;1 将触发经理/总监审批
           </Typography.Text>
         </Form>
       </Modal>

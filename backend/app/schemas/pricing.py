@@ -21,12 +21,14 @@ class CostInput(BaseModel):
     customization_cost: float = 0
     moq_cost: float = 0
     other_cost: float = 0
+    loss_cost: float = 0
 
 
 class PricingCreate(BaseModel):
     inquiry_id: uuid.UUID
     currency: str = "USD"
     target_margin: float | None = None
+    discount_rate: float = Field(default=1, gt=0, le=1, description="折扣率 ∈(0,1]")
     costs: CostInput = Field(default_factory=CostInput)
     remark: str | None = None
 
@@ -34,6 +36,7 @@ class PricingCreate(BaseModel):
 class PricingUpdate(BaseModel):
     currency: str | None = None
     target_margin: float | None = None
+    discount_rate: float | None = Field(default=None, gt=0, le=1)
     costs: CostInput | None = None
     remark: str | None = None
 
@@ -54,10 +57,14 @@ class PricingOut(ORMModel):
     customization_cost: float | None = None
     moq_cost: float | None = None
     other_cost: float | None = None
+    loss_cost: float | None = None
     total_cost: float | None = None
+    base_cost: float | None = None
     target_margin: float | None = None
+    discount_rate: float | None = None
     floor_price: float | None = None
     suggested_price: float | None = None
+    final_price: float | None = None
     can_view_cost: bool = True
     can_view_floor: bool = True
     remark: str | None = None
@@ -69,16 +76,20 @@ class PricingOut(ORMModel):
 
 class PricingCalcIn(CostInput):
     target_margin: float = 0.2
+    discount_rate: float = Field(default=1, gt=0, le=1)
     quantity: float = 1
     exchange_rate: float = 1
 
 
 class PricingCalcOut(BaseModel):
+    base_cost: float
     total_cost: float
     unit_cost: float
     floor_price: float
+    final_price: float
     suggested_price: float
     target_margin: float
+    discount_rate: float
     breakdown: dict[str, float]
 
 
@@ -149,7 +160,8 @@ class QuotationCreate(BaseModel):
     inquiry_id: uuid.UUID | None = None
     pricing_id: uuid.UUID | None = None
     currency: str = "RMB"
-    exchange_rate: float = 1
+    exchange_rate: float = 7.25
+    discount_rate: float = Field(default=1, gt=0, le=1)
     incoterm: str | None = None
     payment_terms: str | None = None
     warranty: str | None = None
@@ -174,6 +186,7 @@ class QuotationUpdate(BaseModel):
     contact_id: uuid.UUID | None = None
     currency: str | None = None
     exchange_rate: float | None = None
+    discount_rate: float | None = Field(default=None, gt=0, le=1)
     incoterm: str | None = None
     payment_terms: str | None = None
     warranty: str | None = None
@@ -238,6 +251,7 @@ class QuotationOut(ORMModel):
     version: int
     currency: str
     exchange_rate: float
+    discount_rate: float | None = None
     incoterm: str | None = None
     payment_terms: str | None = None
     warranty: str | None = None
@@ -307,6 +321,7 @@ class ApprovalOut(ORMModel):
     applicant_id: uuid.UUID | None = None
     applicant_name: str | None = None
     amount: float | None = None
+    discount_rate: float | None = None
     currency: str
     finished_at: datetime | None = None
     created_at: datetime

@@ -36,11 +36,15 @@ class PricingRecord(BusinessModel):
     customization_cost: Mapped[float | None] = mapped_column(MONEY, nullable=True)
     moq_cost: Mapped[float | None] = mapped_column(MONEY, nullable=True)
     other_cost: Mapped[float | None] = mapped_column(MONEY, nullable=True)
+    loss_cost: Mapped[float | None] = mapped_column(MONEY, default=0, nullable=True)
     total_cost: Mapped[float | None] = mapped_column(MONEY, nullable=True)
+    base_cost: Mapped[float | None] = mapped_column(MONEY, nullable=True)
 
     target_margin: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
+    discount_rate: Mapped[float] = mapped_column(Numeric(10, 4), default=1, nullable=False)
     floor_price: Mapped[float | None] = mapped_column(MONEY, nullable=True)
     suggested_price: Mapped[float | None] = mapped_column(MONEY, nullable=True)
+    final_price: Mapped[float | None] = mapped_column(MONEY, nullable=True)
 
     created_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True), nullable=True)
     approved_by: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True), nullable=True)
@@ -82,7 +86,8 @@ class Quotation(BusinessModel):
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     currency: Mapped[str] = mapped_column(String(10), default="RMB", nullable=False)
-    exchange_rate: Mapped[float] = mapped_column(Numeric(18, 6), default=1, nullable=False)
+    exchange_rate: Mapped[float] = mapped_column(Numeric(18, 6), default=7.25, nullable=False)
+    discount_rate: Mapped[float] = mapped_column(Numeric(10, 4), default=1, nullable=False)
     incoterm: Mapped[str | None] = mapped_column(String(20), nullable=True)
     payment_terms: Mapped[str | None] = mapped_column(String(200), nullable=True)
     warranty: Mapped[str | None] = mapped_column(String(200), nullable=True)
@@ -166,6 +171,7 @@ class ApprovalInstance(BaseModel):
     total_steps: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     applicant_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True), nullable=True, index=True)
     amount: Mapped[float | None] = mapped_column(MONEY, nullable=True)
+    discount_rate: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
     currency: Mapped[str] = mapped_column(String(10), default="USD", nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

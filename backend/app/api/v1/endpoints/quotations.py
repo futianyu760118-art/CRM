@@ -29,6 +29,7 @@ from app.schemas.pricing import (
 from app.services import approval as approval_service
 from app.services import company_code, email_service, export_excel, storage
 from app.services import pdf as pdf_service
+from app.services import pricing as pricing_service
 from app.services.data_scope import apply_data_scope
 from app.services.number_sequence import next_number
 from app.services.query import apply_sort, get_or_404, paginate
@@ -258,7 +259,15 @@ async def create_from_pricing(
         .all()
     )
 
-    unit_price = round(float(pricing.suggested_price or pricing.floor_price or 0) * (1 + payload.margin_over_floor), 4)
+    # M2.5-D4：汇率在报价创建时快照（默认 7.25）；M2.5-D2：最终价 = base_cost×(1+利润率)×折扣率，
+    # 由核价生成时按最终总价摊到单位价，并沿用核价的折扣率。
+    total_qty = float(sum(float(i.quantity or 0) for i in inquiry_items) or 1)
+    unit_price = round(
+        float(pricing.final_price or pricing.suggested_price or pricing.floor_price or 0)
+        / total_qty
+        * (1 + payload.margin_over_floor),
+        4,
+    )
     quotation = Quotation(
         company_id=inquiry.company_id,
         contact_id=inquiry.contact_id,
@@ -267,6 +276,8 @@ async def create_from_pricing(
         pricing_id=pricing.id,
         quotation_no=await next_number("quotation"),
         currency=pricing.currency,
+        exchange_rate=pricing_service.DEFAULT_EXCHANGE_RATE,
+        discount_rate=float(pricing.discount_rate or 1),
         incoterm=payload.incoterm,
         payment_terms=payload.payment_terms,
         valid_days=payload.valid_days,
@@ -366,6 +377,26 @@ async def submit_quotation(
     if not quotation.items:
         raise ApiError(message="报价单至少需要一条明细", http_status=400)
 
+    # M2.6-D1：折扣率三档审批，=1 免审直接放行。
+    steps = approval_service.steps_for("QUOTATION", quotation.discount_rate)
+    if not steps:
+        quotation.status = "APPROVED"
+        quotation.approved_by = current.id
+        quotation.approved_at = utcnow()
+        if quotation.opportunity_id:
+            opp = (
+                await db.execute(select(Opportunity).where(Opportunity.id == quotation.opportunity_id))
+            ).scalar_one_or_none()
+            if opp is not None and opp.stage in {"PRICING", "INQUIRY", "REQUIREMENT"}:
+                opp.stage = "QUOTATION"
+                opp.quotation_amount = quotation.total_amount
+        await db.commit()
+        await db.refresh(quotation)
+        data = await _serialize(db, quotation)
+        data["approval_status"] = "APPROVED"
+        data["approval_step"] = "免审"
+        return resp.ok(data)
+
     instance = await approval_service.start(
         db,
         biz_type="QUOTATION",
@@ -375,6 +406,7 @@ async def submit_quotation(
         amount=float(quotation.total_amount or 0),
         currency=quotation.currency,
         applicant=current,
+        discount_rate=quotation.discount_rate,
     )
     quotation.status = "PENDING_APPROVAL"
     if quotation.opportunity_id:
@@ -500,6 +532,9 @@ async def generate_pdf(
     current: User = Depends(require_permission("quotation:pdf")),
 ) -> dict[str, Any]:
     quotation = await get_or_404(db, Quotation, quotation_id, "报价单")
+    # M2.6-D4：未批不得生成/导出报价单。
+    if quotation.status not in {"APPROVED", "SENT", "ACCEPTED"}:
+        raise ApiError(message="报价单需审批通过后方可生成 PDF", http_status=400)
     context = await _price_list_context(db, quotation)
     data, engine = pdf_service.build_price_list_pdf(context)
     filename = f"{quotation.quotation_no}.pdf"
@@ -532,6 +567,9 @@ async def export_quotation_excel(
     _: User = Depends(require_permission("quotation:view")),
 ) -> Response:
     quotation = await get_or_404(db, Quotation, quotation_id, "报价单")
+    # M2.6-D4：未批不得生成/导出报价单。
+    if quotation.status not in {"APPROVED", "SENT", "ACCEPTED"}:
+        raise ApiError(message="报价单需审批通过后方可导出 Excel", http_status=400)
     if not quotation.terms:
         from app.services.export_excel import DEFAULT_NOTES_CN, DEFAULT_NOTES_EN, DEFAULT_TERMS
 

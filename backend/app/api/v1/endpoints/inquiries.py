@@ -317,7 +317,9 @@ async def pricing_versions(
                 "customization_cost",
                 "moq_cost",
                 "other_cost",
+                "loss_cost",
                 "total_cost",
+                "base_cost",
             ):
                 data[field] = None
         if not can_floor:

@@ -42,7 +42,7 @@ def _mask(user: User, row: PricingRecord) -> dict[str, Any]:
     can_cost = user.is_superuser or "pricing:cost_view" in user.permission_codes
     can_floor = user.is_superuser or "pricing:floor_view" in user.permission_codes
     if not can_cost:
-        for field in (*COST_FIELDS, "total_cost"):
+        for field in (*COST_FIELDS, "total_cost", "base_cost"):
             data[field] = None
     if not can_floor:
         data["floor_price"] = None
@@ -75,14 +75,18 @@ async def _calc_and_store(db: DbSession, record: PricingRecord, inquiry: Inquiry
     result = pricing_service.calculate(
         costs=costs,
         quantity=qty,
-        target_margin=float(record.target_margin or pricing_service.DEFAULT_MARGIN),
+        profit_rate=float(record.target_margin or pricing_service.DEFAULT_PROFIT_RATE),
         rules=rules,
         context=context,
+        discount_rate=float(record.discount_rate or 1),
     )
     record.total_cost = result["total_cost"]
+    record.base_cost = result["base_cost"]
     record.floor_price = result["floor_price"]
     record.suggested_price = result["suggested_price"]
+    record.final_price = result["final_price"]
     record.target_margin = result["target_margin"]
+    record.discount_rate = result["discount_rate"]
     record.remark = (
         f"{record.remark or ''}\n命中规则: {', '.join(result['applied_rules'])}".strip()
         if result["applied_rules"]
@@ -138,7 +142,8 @@ async def calc(payload: PricingCalcIn, _: User = Depends(require_permission("pri
     result = pricing_service.calculate(
         costs=payload.model_dump(),
         quantity=payload.quantity,
-        target_margin=payload.target_margin,
+        profit_rate=payload.target_margin,
+        discount_rate=payload.discount_rate,
         exchange_rate=payload.exchange_rate,
     )
     result.pop("applied_rules", None)
@@ -169,6 +174,7 @@ async def create_pricing(
         status="DRAFT",
         currency=payload.currency,
         target_margin=payload.target_margin,
+        discount_rate=payload.discount_rate,
         remark=payload.remark,
         created_by=current.id,
         owner_id=current.id,
@@ -230,6 +236,23 @@ async def update_pricing(
     return resp.ok(_mask(current, record))
 
 
+async def _apply_pricing_approved(db: DbSession, record: PricingRecord, current: User) -> None:
+    """核价通过（免审直批或审批通过）后的单据副作用：询价转已核价、商机转核价阶段。"""
+    record.status = "APPROVED"
+    record.approved_by = current.id
+    record.approved_at = utcnow()
+    inquiry = (await db.execute(select(Inquiry).where(Inquiry.id == record.inquiry_id))).scalar_one_or_none()
+    if inquiry is not None:
+        inquiry.status = "PRICED"
+        if inquiry.opportunity_id:
+            opp = (
+                await db.execute(select(Opportunity).where(Opportunity.id == inquiry.opportunity_id))
+            ).scalar_one_or_none()
+            if opp is not None and opp.stage in {"INQUIRY", "REQUIREMENT"}:
+                opp.stage = "PRICING"
+                opp.pricing_id = record.id
+
+
 @router.post("/{pricing_id}/submit", summary="提交核价审批")
 async def submit_pricing(
     pricing_id: uuid.UUID,
@@ -241,6 +264,17 @@ async def submit_pricing(
         raise ApiError(message=f"当前状态 {record.status} 不可提交", http_status=400)
     inquiry = await get_or_404(db, Inquiry, record.inquiry_id, "询价单")
 
+    steps = approval_service.steps_for("PRICING", record.discount_rate)
+    if not steps:
+        # M2.6-D1：折扣率 =1 免审，直接放行。
+        await _apply_pricing_approved(db, record, current)
+        await db.commit()
+        await db.refresh(record)
+        data = _mask(current, record)
+        data["approval_status"] = "APPROVED"
+        data["approval_step"] = "免审"
+        return resp.ok(data)
+
     instance = await approval_service.start(
         db,
         biz_type="PRICING",
@@ -250,6 +284,7 @@ async def submit_pricing(
         amount=float(record.total_cost or 0),
         currency=record.currency,
         applicant=current,
+        discount_rate=record.discount_rate,
     )
     record.status = "PENDING_APPROVAL"
     await db.commit()
@@ -279,19 +314,7 @@ async def approve_pricing(
     )
 
     if instance.status == "APPROVED":
-        record.status = "APPROVED"
-        record.approved_by = current.id
-        record.approved_at = utcnow()
-        inquiry = (await db.execute(select(Inquiry).where(Inquiry.id == record.inquiry_id))).scalar_one_or_none()
-        if inquiry is not None:
-            inquiry.status = "PRICED"
-            if inquiry.opportunity_id:
-                opp = (
-                    await db.execute(select(Opportunity).where(Opportunity.id == inquiry.opportunity_id))
-                ).scalar_one_or_none()
-                if opp is not None and opp.stage in {"INQUIRY", "REQUIREMENT"}:
-                    opp.stage = "PRICING"
-                    opp.pricing_id = record.id
+        await _apply_pricing_approved(db, record, current)
     elif instance.status == "REJECTED":
         record.status = "DRAFT"
 

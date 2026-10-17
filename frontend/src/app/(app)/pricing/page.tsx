@@ -65,10 +65,16 @@ function RecordsTab() {
       render: (v: number | null) => (v === null ? <Tag color="red">无权限</Tag> : formatNumber(v, 4)),
     },
     {
-      title: '建议价',
-      dataIndex: 'suggested_price',
+      title: '最终价',
+      dataIndex: 'final_price',
       width: 110,
-      render: (v: number | null) => formatNumber(v, 4),
+      render: (v: number | null) => formatNumber(v, 2),
+    },
+    {
+      title: '折扣率',
+      dataIndex: 'discount_rate',
+      width: 90,
+      render: (v: number | null) => (v == null ? '1' : String(v)),
     },
     {
       title: '创建时间',
@@ -165,7 +171,7 @@ function RulesTab() {
   return (
     <>
       <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-        核价规则引擎（P1）：条件为 JSON（支持 eq / in / gte / lte / contains），动作为 margin、margin_delta、price_multiplier。
+        核价规则引擎（P1）：条件为 JSON（支持 eq / in / gte / lte / contains），动作为 margin、margin_delta（规则只调利润率，不直接乘最终价）。
       </Typography.Paragraph>
       <Table<PricingRule>
         rowKey="id"

@@ -39,6 +39,7 @@ const COST_LABELS: Record<string, string> = {
   customization_cost: '定制费',
   moq_cost: '起订量成本',
   other_cost: '其他成本',
+  loss_cost: '损耗成本',
 };
 
 export default function PricingDetailPage() {
@@ -154,14 +155,21 @@ export default function PricingDetailPage() {
               </Col>
               <Col span={12} style={{ marginTop: 16 }}>
                 <Statistic
-                  title="建议售价"
-                  value={data.suggested_price ?? 0}
-                  precision={4}
+                  title="最终报价（对外）"
+                  value={data.final_price ?? 0}
+                  precision={2}
                   prefix="$"
                 />
               </Col>
               <Col span={12} style={{ marginTop: 16 }}>
                 <Statistic title="目标利润率" value={formatPercent(data.target_margin)} />
+              </Col>
+              <Col span={12} style={{ marginTop: 16 }}>
+                <Statistic
+                  title="折扣率"
+                  value={data.discount_rate == null ? 1 : data.discount_rate}
+                  precision={4}
+                />
               </Col>
             </Row>
             {data.can_view_cost === false ? (
