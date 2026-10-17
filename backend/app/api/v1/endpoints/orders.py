@@ -149,6 +149,7 @@ async def transition_order(
     if payload.status != row.status and payload.status not in allowed_order_transitions(row.status):
         raise ConflictError(f"不允许从 {row.status} 流转到 {payload.status}")
     row.status = payload.status
+    row.user_status_locked = True
     row.user_status_modified_at = utcnow()
     row.user_status_modified_by = current.id
     await db.flush()

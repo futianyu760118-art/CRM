@@ -52,6 +52,7 @@ async def ingest(
     db: DbSession,
     _: None = Depends(_verify_inbound_token),
 ) -> dict[str, Any]:
+    # 头按 RFC 3986 解码后优先采用；缺失则回退事件体键/整包重算（见 _resolve_key）
     result = await ebms_ingest.ingest_event(db, payload, _idempotency_key_header(request))
     await db.commit()
     return resp.ok(result)

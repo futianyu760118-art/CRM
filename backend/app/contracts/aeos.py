@@ -272,8 +272,8 @@ def build_exception_contract(
 #
 # 契约冻结版 §4：13 种事件 = 6 个业务实体 × {upserted, deleted} + dictionary.upserted。
 # 幂等键 = {target_system}:{event_type}:{object_id}:{fingerprint}；
-# fingerprint = sha1(canonical(event 去掉 occurred_at))[:16]，
-# canonical = UTF-8、键排序、无空格、金额/数量按十进制字符串（规避浮点漂移）。
+# fingerprint = sha1(canonical(event 去掉 occurred_at/event_id/trace_id/idempotency_key))[:16]，
+# canonical = UTF-8、键排序、无空格，标量原样保留（仅 datetime/date 转 ISO 字符串）。
 # ---------------------------------------------------------------------------
 
 #: 可同步的对象类型（PascalCase，契约 §4.1 冻结；dictionary 仅 upserted，不产生 deleted）
@@ -399,32 +399,34 @@ def build_event_contract(
     )
 
 
-#: 指纹 canonical 时递归剔除的审计时间键（「返工1·契约」§4.1 冻结）
-_FINGERPRINT_EXCLUDE: tuple[str, ...] = ("created_at", "updated_at")
+def _canonicalize(value: Any) -> Any:
+    """规整为稳定可序列化形态：键排序，datetime/date → ISO 字符串，其余标量原样保留。
 
-
-def _canonical(value: Any) -> Any:
-    """指纹 canonical：递归键排序、剔除审计时间键、保留 JSON 原生类型（§4.1 冻结）。"""
+    对齐 EBMS 整包口径：bool/None/int/str/float 均以 JSON 原生字面量参与指纹，
+    不做字符串化（避免两侧序列化差异导致指纹不一致）。
+    """
     if isinstance(value, dict):
-        return {
-            str(k): _canonical(v)
-            for k, v in sorted(value.items(), key=lambda item: str(item[0]))
-            if k not in _FINGERPRINT_EXCLUDE
-        }
+        return {str(k): _canonicalize(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
     if isinstance(value, (list, tuple)):
-        return [_canonical(v) for v in value]
+        return [_canonicalize(v) for v in value]
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
     return value
 
 
 def canonical_json(payload: Mapping[str, Any]) -> str:
     """指纹 canonical 序列化：UTF-8、递归键排序、无空格、非 ASCII 原样、JSON 原生类型。"""
-    return json.dumps(_canonical(payload), ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(_canonicalize(payload), ensure_ascii=False, separators=(",", ":"))
+
+
+#: 指纹计算需剔除的易变/派生字段（对齐 EBMS 整包口径 §4.1）
+_FINGERPRINT_EXCLUDED_FIELDS = frozenset({"occurred_at", "event_id", "trace_id", "idempotency_key"})
 
 
 def event_fingerprint(event: Mapping[str, Any]) -> str:
-    """事件指纹 = sha1(canonical(payload'))[:16]，只哈希业务内容（不含信封与审计时间）。"""
-    payload = event.get("payload") or {}
-    return hashlib.sha1(canonical_json(payload).encode("utf-8")).hexdigest()[:16]
+    """事件内容指纹：整包口径，剔除 occurred_at / event_id / trace_id / idempotency_key。"""
+    stable = {k: v for k, v in event.items() if k not in _FINGERPRINT_EXCLUDED_FIELDS}
+    return hashlib.sha1(canonical_json(stable).encode("utf-8")).hexdigest()[:16]
 
 
 def event_idempotency_key(target_system: str, event: Mapping[str, Any]) -> str:

@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import io
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Query, UploadFile
+from openpyxl import load_workbook
 from sqlalchemy import func, or_, select, update
 
 from app.core import response as resp
 from app.core.deps import DbSession, require_permission
-from app.core.exceptions import ConflictError
+from app.core.error_codes import ErrCode
+from app.core.exceptions import ApiError, ConflictError, ForbiddenError
 from app.models.business import (
     Activity,
     BusinessCode,
@@ -24,6 +27,8 @@ from app.models.pricing import Quotation
 from app.models.user import User
 from app.schemas.business import (
     BusinessCodeOut,
+    CompanyBatchDeleteIn,
+    CompanyBatchUpdateIn,
     CompanyCreate,
     CompanyMergeIn,
     CompanyMergeOut,
@@ -34,12 +39,48 @@ from app.schemas.business import (
     CustomerCodePreview,
 )
 from app.services import company_code, ebms_sync
-from app.services.data_scope import apply_data_scope
+from app.services.data_scope import apply_data_scope, can_access_owner, get_user_scope
 from app.services.query import apply_sort, get_or_404, paginate, soft_delete
 
 router = APIRouter(prefix="/customers", tags=["M2-客户"])
 
 CODE_RULE = "{业务员编号}-{业务员第N个客户}-{公司第N个客户}，如 HJ003-176-576；同客户多币别追加 -1/-2"
+
+#: 允许批量修改的客户字段白名单（对齐 EBMS 批量编辑，仅覆盖表单标量字段）
+COMPANY_BATCH_EDITABLE_FIELDS = {
+    "customer_level",
+    "sales_mode",
+    "customer_status",
+    "status",
+    "country",
+    "country_region",
+    "industry",
+    "source",
+}
+
+#: Excel 导入表头映射：EBMS 模板中文列名 -> CRM Company 字段（客户编号由系统自动生成，不参与映射）
+CUSTOMER_IMPORT_HEADER_MAP = {
+    "客户全称": "name",
+    "客户曾用名": "former_name",
+    "母公司编号": "parent_code",
+    "决策人姓名": "decision_maker",
+    "决策人职位": "decision_maker_position",
+    "决策核心诉求": "decision_core_need",
+    "客户等级": "customer_level",
+    "销售模式": "sales_mode",
+    "客户状态": "customer_status",
+    "最后交易年份": "last_trade_year",
+    "开票抬头": "invoice_title",
+    "纳税人识别号": "tax_id",
+    "开户银行": "bank_name",
+    "银行账号": "bank_account",
+    "地址": "address",
+    "国家/地区": "country_region",
+    "客户来源": "source",
+    "备注说明": "remark",
+    "网站": "website",
+    "行业": "industry",
+}
 
 
 async def _company_or_404(db: DbSession, company_id: uuid.UUID) -> Company:
@@ -237,13 +278,135 @@ async def merge_companies(
     )
 
 
+@router.put("/batch-update", summary="批量修改客户（仅白名单字段）")
+async def batch_update_companies(
+    payload: CompanyBatchUpdateIn,
+    db: DbSession,
+    current: User = Depends(require_permission("customer:update")),
+) -> dict[str, Any]:
+    unknown = set(payload.fields) - COMPANY_BATCH_EDITABLE_FIELDS
+    if unknown:
+        raise ApiError(
+            ErrCode.VALIDATION_ERROR,
+            f"不允许批量修改字段: {', '.join(sorted(unknown))}",
+            http_status=400,
+        )
+    stmt = select(Company).where(Company.id.in_(payload.ids), Company.deleted_at.is_(None))
+    stmt = await apply_data_scope(stmt, Company, current, db)
+    rows = (await db.execute(stmt)).scalars().all()
+    updated = 0
+    for row in rows:
+        for key, value in payload.fields.items():
+            setattr(row, key, value)
+        await ebms_sync.emit_upsert(db, "Customer", row)
+        updated += 1
+    await db.commit()
+    return resp.ok({"updated": updated, "requested": len(payload.ids)})
+
+
+@router.post("/batch-delete", summary="批量删除客户（软删除）")
+async def batch_delete_companies(
+    payload: CompanyBatchDeleteIn,
+    db: DbSession,
+    current: User = Depends(require_permission("customer:delete")),
+) -> dict[str, Any]:
+    stmt = select(Company).where(Company.id.in_(payload.ids), Company.deleted_at.is_(None))
+    stmt = await apply_data_scope(stmt, Company, current, db)
+    rows = (await db.execute(stmt)).scalars().all()
+    deleted = 0
+    for row in rows:
+        soft_delete(row)
+        await ebms_sync.emit_delete(db, "Customer", row)
+        deleted += 1
+    await db.commit()
+    return resp.ok({"deleted": deleted, "requested": len(payload.ids)})
+
+
+@router.post("/import-xlsx", summary="Excel 批量导入客户（按名称去重，同一文件重复导入不产生重复）")
+async def import_companies_xlsx(
+    db: DbSession,
+    file: UploadFile = File(...),
+    current: User = Depends(require_permission("customer:create")),
+) -> dict[str, Any]:
+    content = await file.read()
+    if not content:
+        raise ApiError(ErrCode.VALIDATION_ERROR, "请上传非空文件", http_status=400)
+    try:
+        workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        sheet = workbook[workbook.sheetnames[0]]
+        rows = list(sheet.iter_rows(values_only=True))
+    except Exception as exc:  # noqa: BLE001
+        raise ApiError(ErrCode.VALIDATION_ERROR, f"无法解析 Excel 文件: {exc}", http_status=400) from exc
+
+    if not rows:
+        return resp.ok({"imported": 0, "skipped": 0, "results": []})
+
+    headers = [str(h).strip() if h is not None else "" for h in rows[0]]
+    col_map = {idx: CUSTOMER_IMPORT_HEADER_MAP[h] for idx, h in enumerate(headers) if h in CUSTOMER_IMPORT_HEADER_MAP}
+
+    existing_names = {
+        name.strip().lower()
+        for (name,) in (
+            await db.execute(select(Company.name).where(Company.deleted_at.is_(None)))
+        ).all()
+        if name
+    }
+
+    imported = 0
+    skipped = 0
+    results: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for line_no, row in enumerate(rows[1:], start=2):
+        if not row:
+            continue
+        fields: dict[str, Any] = {}
+        for idx, field in col_map.items():
+            cell = row[idx] if idx < len(row) else None
+            if cell is not None:
+                fields[field] = str(cell).strip()
+        name = fields.get("name") or ""
+        if not name:
+            skipped += 1
+            results.append({"row": line_no, "status": "skipped", "reason": "客户名称为空"})
+            continue
+        normalized = name.strip().lower()
+        if normalized in existing_names or normalized in seen_names:
+            skipped += 1
+            results.append({"row": line_no, "name": name, "status": "skipped", "reason": "客户名称已存在"})
+            continue
+
+        code, owner_seq, global_seq = await company_code.next_company_code(current)
+        company = Company(
+            **fields,
+            code=code,
+            owner_seq=owner_seq,
+            global_seq=global_seq,
+            owner_id=current.id,
+            department_id=current.department_id,
+            currency="USD",
+        )
+        db.add(company)
+        await db.flush()
+        await company_code.ensure_primary_code(db, company)
+        await ebms_sync.emit_upsert(db, "Customer", company)
+        seen_names.add(normalized)
+        imported += 1
+        results.append({"row": line_no, "name": name, "status": "imported"})
+
+    await db.commit()
+    return resp.ok({"imported": imported, "skipped": skipped, "results": results})
+
+
 @router.get("/{company_id}", summary="客户详情")
 async def get_company(
     company_id: uuid.UUID,
     db: DbSession,
-    _: User = Depends(require_permission("customer:view")),
+    current: User = Depends(require_permission("customer:view")),
 ) -> dict[str, Any]:
     company = await _company_or_404(db, company_id)
+    scope_type, dept_ids = await get_user_scope(current, db)
+    if not can_access_owner(current, scope_type, dept_ids, company.owner_id, company.department_id):
+        raise ForbiddenError("无权限访问该客户")
     enriched = await _enrich(db, [company])
     data = enriched[0]
 

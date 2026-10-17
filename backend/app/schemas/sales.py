@@ -49,6 +49,7 @@ class SalesOrderUpdate(BaseModel):
     promised_date: date | None = None
     plan_date: date | None = None
     online_date: date | None = None
+    user_status_locked: bool | None = None
     remark: str | None = None
     owner_id: uuid.UUID | None = None
 
