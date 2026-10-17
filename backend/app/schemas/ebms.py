@@ -34,7 +34,7 @@ class PilotResultIn(BaseModel):
 
 
 class PilotExceptionIn(BaseModel):
-    sla_days: int = Field(default=30, ge=0, le=3650)
+    sla_days: int = Field(default=7, ge=0, le=3650)
     as_of: datetime | None = None
     limit: int = Field(default=200, ge=1, le=5000)
     deliver: bool = Field(default=True, description="入队后立即投递（联调一把过）")

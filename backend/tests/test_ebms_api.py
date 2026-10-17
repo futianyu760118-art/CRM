@@ -30,6 +30,7 @@ from app.db.session import get_db
 from app.models.business import Company
 from app.models.integration import IntegrationLog, IntegrationOutbox
 from app.models.pricing import Quotation
+from app.models.sales import SalesOrder
 from app.services import ebms
 
 TEST_DB_URL = os.environ.get("CRM_TEST_DATABASE_URL")
@@ -69,6 +70,7 @@ async def _clean(session) -> None:
         delete(IntegrationOutbox).where(IntegrationOutbox.event_type.in_((ebms.EVENT_RESULT, ebms.EVENT_EXCEPTION)))
     )
     await session.execute(delete(Quotation).where(Quotation.quotation_no.like(f"{CODE_PREFIX}%")))
+    await session.execute(delete(SalesOrder).where(SalesOrder.order_no.like(f"{CODE_PREFIX}%")))
     await session.execute(delete(Company).where(Company.code.like(f"{CODE_PREFIX}%")))
     await session.flush()
 
@@ -123,6 +125,20 @@ async def _seed_quotation(session, *, approved_at: datetime) -> Quotation:
     return quotation
 
 
+async def _seed_sales_order(session, *, created_at: datetime) -> SalesOrder:
+    """16-06=B：交付逾期取 SalesOrder，无 promised_date 时回退 created_at + sla。"""
+    order = SalesOrder(
+        order_no=f"{CODE_PREFIX}{uuid.uuid4().hex[:8]}",
+        line_no="1",
+        customer_name="PAND163 API 订单",
+        status="open",
+    )
+    order.created_at = created_at
+    session.add(order)
+    await session.flush()
+    return order
+
+
 @pytest.fixture
 async def seeded(session):
     """试点 A 用：业务时间落在 2026-10-07（+08）。"""
@@ -132,7 +148,7 @@ async def seeded(session):
 @pytest.fixture
 async def overdue(session):
     """试点 B 用：业务时间远早于 as_of，稳定逾期。"""
-    return await _seed_quotation(session, approved_at=datetime(2026, 9, 1, 2, 0, tzinfo=UTC))
+    return await _seed_sales_order(session, created_at=datetime(2026, 9, 1, 2, 0, tzinfo=UTC))
 
 
 def test_ebms_routes_are_registered_on_real_router() -> None:
@@ -250,12 +266,12 @@ async def test_pilot_b_through_http(client, session, overdue) -> None:
     data = resp.json()["data"]
     assert data["reason_code"] == "DELIVERY_OVERDUE"
 
-    entry = next(e for e in data["emitted"] if e["object_id"] == overdue.quotation_no)
+    entry = next(e for e in data["emitted"] if e["object_id"] == overdue.order_no)
     assert entry["created"] is True
     # 业务时间 2026-09-01 02:00Z 距 as_of 约 36 天 → 超过 critical 阈值(30)
     assert entry["days_overdue"] == 36
     assert entry["severity"] == "critical"
-    assert entry["contract_id"] == f"EXC-M05-{overdue.quotation_no}"
+    assert entry["contract_id"] == f"EXC-M05-{overdue.order_no}"
 
     log = (
         await session.execute(

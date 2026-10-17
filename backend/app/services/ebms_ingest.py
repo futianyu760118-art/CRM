@@ -36,6 +36,7 @@ from app.contracts.aeos import (
     validate_contract,
 )
 from app.db.base import utcnow
+from app.domain.state_machine import EXTERNAL_ORDER_STATUS_MAP
 from app.models.business import Company, Inquiry, InquiryItem
 from app.models.integration import IntegrationLog
 from app.models.sales import Feedback, QuoteLibrary, SalesOrder, Sample, SyncConflict
@@ -258,9 +259,20 @@ def _external_id(object_type: str, payload: Mapping[str, Any]) -> str:
 
 
 def _map_payload(object_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-    """把 EBMS 线字段映射为 CRM 模型列（仅白名单字段，未声明字段丢弃）。"""
+    """把 EBMS 线字段映射为 CRM 模型列（仅白名单字段，未声明字段丢弃）。
+
+    订单状态按冻结契约 ``EXTERNAL_ORDER_STATUS_MAP`` 做值映射（16-09=B：同名映射）。
+    """
     mapping = FIELD_MAPS.get(object_type, {})
-    return {column: payload[wire] for wire, column in mapping.items() if wire in payload}
+    out: dict[str, Any] = {}
+    for wire, column in mapping.items():
+        if wire not in payload:
+            continue
+        value = payload[wire]
+        if object_type == "Order" and column == "status":
+            value = EXTERNAL_ORDER_STATUS_MAP.get(value, value)
+        out[column] = value
+    return out
 
 
 def _coerce(column: str, value: Any) -> Any:

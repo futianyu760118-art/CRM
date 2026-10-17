@@ -216,8 +216,8 @@ ORDER_TERMINAL: set[str] = {"completed", "closed", "cancelled"}
 # 风险等级：默认 blue；表单 low/medium/high，过滤 blue/yellow/red（契约 §4.2 双轨）
 ORDER_RISK_FORM: list[str] = ["low", "medium", "high"]
 ORDER_RISK_FILTER: list[str] = ["blue", "yellow", "red"]
-# 外部状态 -> 本地状态映射（AC-M4.4）
-EXTERNAL_ORDER_STATUS_MAP: dict[str, str] = {"completed": "shipped", "closed": "completed"}
+# 外部状态 -> 本地状态映射（AC-M4.4；16-09=B：同名映射 completed→completed、closed→closed）
+EXTERNAL_ORDER_STATUS_MAP: dict[str, str] = {"completed": "completed", "closed": "closed"}
 
 # 样品（AC-M5.3）
 SAMPLE_STATUSES: list[str] = ["pending", "confirmed", "producing", "sent", "customer_confirmed", "completed"]
