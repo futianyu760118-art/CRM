@@ -120,7 +120,7 @@ def render_html(context: dict[str, Any]) -> str:
             f"<td>{item.get('spec') or ''}</td>"
             f'<td class="right">{_fmt(item.get("quantity"), 0)}</td>'
             f"<td>{item.get('unit') or ''}</td>"
-            f'<td class="right">{_fmt(item.get("unit_price"), 4)}</td>'
+            f'<td class="right">{_fmt(item.get("unit_price"))}</td>'
             f'<td class="right">{_fmt(item.get("amount"), 2)}</td>'
             "</tr>"
         )
@@ -260,7 +260,7 @@ def _reportlab_pdf(context: dict[str, Any]) -> bytes:
                 Paragraph(str(item.get("spec") or ""), body_style),
                 Paragraph(_fmt(item.get("quantity"), 0), body_style),
                 Paragraph(str(item.get("unit") or ""), body_style),
-                Paragraph(_fmt(item.get("unit_price"), 4), body_style),
+                Paragraph(_fmt(item.get("unit_price")), body_style),
                 Paragraph(_fmt(item.get("amount"), 2), body_style),
             ]
         )

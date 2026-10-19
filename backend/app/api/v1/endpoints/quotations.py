@@ -237,6 +237,11 @@ async def create_quotation(
     return resp.ok(await _serialize(db, quotation))
 
 
+def _allocate_unit_price(final_price: float, total_qty: float, margin_over_floor: float = 0.0) -> float:
+    """M2.5-D4：对外单位价按 2 位落库，避免数量不整除时产生 4 位对外价。"""
+    return round(float(final_price or 0) / (total_qty or 1) * (1 + margin_over_floor), 2)
+
+
 @router.post("/from-pricing", summary="由核价记录生成报价单", status_code=201)
 async def create_from_pricing(
     payload: QuotationFromPricingIn,
@@ -262,11 +267,10 @@ async def create_from_pricing(
     # M2.5-D4：汇率在报价创建时快照（默认 7.25）；M2.5-D2：最终价 = base_cost×(1+利润率)×折扣率，
     # 由核价生成时按最终总价摊到单位价，并沿用核价的折扣率。
     total_qty = float(sum(float(i.quantity or 0) for i in inquiry_items) or 1)
-    unit_price = round(
-        float(pricing.final_price or pricing.suggested_price or pricing.floor_price or 0)
-        / total_qty
-        * (1 + payload.margin_over_floor),
-        4,
+    unit_price = _allocate_unit_price(
+        pricing.final_price or pricing.suggested_price or pricing.floor_price or 0,
+        total_qty,
+        payload.margin_over_floor,
     )
     quotation = Quotation(
         company_id=inquiry.company_id,

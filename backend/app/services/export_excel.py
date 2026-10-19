@@ -350,13 +350,15 @@ async def build_quotation_workbook(db: AsyncSession, quotation: Quotation, *, se
         unit_cell.border = BORDER
         unit_cell.alignment = CENTER
 
+    # M2.5-D4：对外报价 2 位，xlsx 单位价同时落 2 位数值与 0.00 数字格式。
+    price_col = labels.index("Price") + 1
     current = header_row + 2
     for item in items:
         values = [
             item.item_no or item.product_name,
             None,
             item.description or item.spec or "",
-            item.unit_price,
+            round(float(item.unit_price or 0), 2),
             item.moq,
             item.power,
             item.ip,
@@ -370,6 +372,8 @@ async def build_quotation_workbook(db: AsyncSession, quotation: Quotation, *, se
             cell.font = NORMAL_FONT
             cell.border = BORDER
             cell.alignment = WRAP
+            if idx == price_col:
+                cell.number_format = "0.00"
         if item.image_file_id and str(item.image_file_id) in images:
             _insert_image(ws, images[str(item.image_file_id)], f"B{current}", width=100)
             ws.row_dimensions[current].height = 78
