@@ -34,7 +34,10 @@ services:
       retries: 20
 
   minio:
-    image: quay.io/minio/minio:latest
+    # MinIO stopped publishing community images (quay.io/minio/minio now 401s
+    # anonymous pulls); Silo is Pigsty's API-compatible MinIO fork and ships the
+    # same server entrypoint + mc client — drop-in replacement.
+    image: pgsty/silo:RELEASE.2026-10-18T00-00-00Z
     container_name: crm-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
