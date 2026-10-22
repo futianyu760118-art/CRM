@@ -25,6 +25,7 @@ next-env.d.ts
 **/.env
 **/.env.*
 **/.env.local
+!**/.env.example
 
 # ---- 业务隐私：实际客户/单据数据 ----
 # 历史询价 Excel（193MB，含真实客户与业务员姓名）
