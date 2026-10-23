@@ -449,6 +449,43 @@ async def _run_http(
     return stats, errors
 
 
+LINK_RULES: dict[str, tuple[str, str]] = {
+    # 表别名 -> (别名, 承载客户编码的列)；EBMS 订单/样品的 customer_name 实际存的是客户编码
+    "sales_order": ("o", "o.customer_code"),
+    "inquiry": ("i", "i.customer_code"),
+    "sample": ("s", "s.customer_name"),
+}
+
+
+async def _link_company_refs(dry_run: bool) -> dict[str, int]:
+    from sqlalchemy import text
+
+    from app.db.session import async_session_factory
+
+    counts: dict[str, int] = {}
+    async with async_session_factory() as db:
+        for table, (alias, code_column) in LINK_RULES.items():
+            source = f"{table} {alias}"
+            match = f"c.code = {code_column} AND c.deleted_at IS NULL"
+            pending = f"{alias}.company_id IS NULL AND {alias}.deleted_at IS NULL"
+            counts[table] = int(
+                (
+                    await db.execute(
+                        text(f"SELECT count(*) FROM {source} JOIN company c ON {match} WHERE {pending}")
+                    )
+                ).scalar_one()
+            )
+            if not dry_run:
+                await db.execute(
+                    text(f"UPDATE {source} SET company_id = c.id FROM company c WHERE {match} AND {pending}")
+                )
+        if dry_run:
+            await db.rollback()
+        else:
+            await db.commit()
+    return counts
+
+
 async def _verify(dump: dict[str, list[dict[str, Any]]], events: list[dict[str, Any]]) -> dict[str, Any]:
     from sqlalchemy import select
 
@@ -626,11 +663,19 @@ def main() -> None:
     p_verify.add_argument("--dump", required=True)
     p_verify.add_argument("--json-out", help="对账 JSON 输出路径")
 
+    p_link = sub.add_parser("link", help="按客户编码回填订单/询价/样品的公司外键")
+    p_link.add_argument("--dry-run", action="store_true", help="只统计待回填行数，不写库")
+
     args = parser.parse_args()
 
     if args.command == "extract":
         counts = extract_sqlite(args.ebms_db, args.dump)
         print(json.dumps(counts, ensure_ascii=False))
+        return
+
+    if args.command == "link":
+        counts = asyncio.run(_link_company_refs(args.dry_run))
+        print(json.dumps({"dry_run": args.dry_run, "linked": counts}, ensure_ascii=False))
         return
 
     dump = load_dump(args.dump)
