@@ -6,6 +6,8 @@ M2.6 口径（签批 D1~D4=A）：
 - 层级映射：经理 → ``manager``、总监 → ``boss``（两档）。
 - 折扣率定义：``∈(0,1]``，相对「标准价」= ``base_cost × (1 + profit_rate)``。
 - 未批行为：未批不得生成/导出报价单，仅可保存核价草稿。
+- 金额门槛（M2.6-D1 附加条件）：默认关闭；开启后金额超过门槛自动升一级
+  （免审→经理、经理→总监），由 ``system_config`` 维护。
 """
 
 from __future__ import annotations
@@ -20,24 +22,60 @@ from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from app.db.base import utcnow
 from app.models.pricing import ApprovalInstance, ApprovalLog, ApprovalTask
 from app.models.user import User
+from app.services import system_config
 
 DISCOUNT_FREE = 1.0
 DISCOUNT_MANAGER_THRESHOLD = 0.95
 
+#: 金额门槛配置项（M2.6-D1 附加条件，默认关闭）。
+AMOUNT_THRESHOLD_ENABLED_KEY = "approval.discount_amount_threshold_enabled"
+AMOUNT_THRESHOLD_KEY = "approval.discount_amount_threshold"
+DEFAULT_AMOUNT_THRESHOLD = 50000.0
 
-def steps_for(biz_type: str, discount_rate: float | None) -> list[str]:
-    """按折扣率返回审批角色链。
+_UPGRADED_STEPS = {
+    (): ["manager"],
+    ("manager",): ["manager", "boss"],
+    ("boss",): ["boss"],
+}
+
+
+def steps_for(
+    biz_type: str,
+    discount_rate: float | None,
+    amount: float | None = None,
+    *,
+    amount_threshold_enabled: bool = False,
+    amount_threshold: float | None = None,
+) -> list[str]:
+    """按折扣率返回审批角色链（金额门槛为可选附加条件）。
 
     - ``=1`` → ``[]``（免审）
     - ``[0.95, 1)`` → ``["manager"]``（经理）
     - ``<0.95`` → ``["boss"]``（总监）
+
+    开启金额门槛且 ``amount`` 超过 ``amount_threshold`` 时自动升一级：
+    免审 → 经理、经理 → 总监（总监已是最高档，不变）。
     """
     dr = float(discount_rate) if discount_rate is not None else DISCOUNT_FREE
     if dr >= DISCOUNT_FREE:
-        return []
-    if dr >= DISCOUNT_MANAGER_THRESHOLD:
-        return ["manager"]
-    return ["boss"]
+        steps: list[str] = []
+    elif dr >= DISCOUNT_MANAGER_THRESHOLD:
+        steps = ["manager"]
+    else:
+        steps = ["boss"]
+
+    if amount_threshold_enabled and amount is not None:
+        threshold = DEFAULT_AMOUNT_THRESHOLD if amount_threshold is None else float(amount_threshold)
+        if float(amount) > threshold:
+            steps = list(_UPGRADED_STEPS[tuple(steps)])
+    return steps
+
+
+async def load_amount_threshold(db: AsyncSession) -> tuple[bool, float]:
+    """读取金额门槛配置（开关 + 门槛值），缺省关闭。"""
+    enabled = await system_config.get_bool(db, AMOUNT_THRESHOLD_ENABLED_KEY, False)
+    threshold = await system_config.get_float(db, AMOUNT_THRESHOLD_KEY, DEFAULT_AMOUNT_THRESHOLD)
+    return enabled, threshold
 
 
 async def start(
@@ -51,6 +89,8 @@ async def start(
     currency: str,
     applicant: User,
     discount_rate: float | None = None,
+    amount_threshold_enabled: bool = False,
+    amount_threshold: float | None = None,
 ) -> ApprovalInstance:
     existing = (
         await db.execute(
@@ -65,7 +105,13 @@ async def start(
     if existing is not None:
         raise ConflictError("该单据已存在进行中的审批")
 
-    steps = steps_for(biz_type, discount_rate)
+    steps = steps_for(
+        biz_type,
+        discount_rate,
+        amount,
+        amount_threshold_enabled=amount_threshold_enabled,
+        amount_threshold=amount_threshold,
+    )
     if not steps:
         raise ConflictError("该折扣率无需审批（免审）")
 

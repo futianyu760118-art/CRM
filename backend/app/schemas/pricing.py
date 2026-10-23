@@ -160,7 +160,8 @@ class QuotationCreate(BaseModel):
     inquiry_id: uuid.UUID | None = None
     pricing_id: uuid.UUID | None = None
     currency: str = "RMB"
-    exchange_rate: float = 7.25
+    # 未填时由 ``system_config.pricing.exchange_rate`` 取值快照（默认 7.25）。
+    exchange_rate: float | None = None
     discount_rate: float = Field(default=1, gt=0, le=1)
     incoterm: str | None = None
     payment_terms: str | None = None
