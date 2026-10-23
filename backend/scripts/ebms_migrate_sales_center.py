@@ -788,12 +788,24 @@ def _customer_values(entity: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _split_phone(value: str | None) -> tuple[str | None, str | None]:
+    """contact.phone 为 varchar(50)；多行（Tel/Fax/网址）取首个含数字行，原文转入 remark 保真。"""
+    if not value:
+        return value, None
+    if len(value) <= 50:
+        return value, None
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    phone = next((line for line in lines if any(ch.isdigit() for ch in line)), lines[0] if lines else value)
+    return phone[:50], value
+
+
 def _customer_contacts(entity: dict[str, Any]) -> list[dict[str, Any]]:
     contacts: list[dict[str, Any]] = []
     seen: set[tuple[str, str | None, str | None, str | None]] = set()
     for row in sorted(entity["rows"], key=_updated_key):
         person = _clean_contact(row.get("contact_person")) or _clean_contact(row.get("contact"))
-        phone = _clean_contact(row.get("phone"))
+        raw_phone = _clean_contact(row.get("phone"))
+        phone, phone_raw = _split_phone(raw_phone)
         wechat = _clean_contact(row.get("wechat"))
         email = _clean_contact(row.get("email"))
         if not any((person, phone, wechat, email)):
@@ -813,6 +825,7 @@ def _customer_contacts(entity: dict[str, Any]) -> list[dict[str, Any]]:
                 "whatsapp": _s(row.get("whatsapp")),
                 "skype": _s(row.get("skype")),
                 "other_im": _s(row.get("other_im")),
+                "remark": f"原始联系方式：{phone_raw}" if phone_raw else None,
             }
         )
     return contacts
@@ -872,7 +885,7 @@ async def _upsert_contacts(db: Any, company: Any, desired: list[dict[str, Any]],
             stats["contact.created"] += 1
         else:
             stats["contact.matched"] += 1
-        for attr in ("position", "whatsapp", "skype", "other_im", "phone", "wechat", "email"):
+        for attr in ("position", "whatsapp", "skype", "other_im", "phone", "wechat", "email", "remark"):
             value = item[attr]
             if value is not None and getattr(contact, attr) != value:
                 setattr(contact, attr, value)
@@ -1070,7 +1083,11 @@ async def _repair(dump: dict[str, list[dict[str, Any]]], dry_run: bool) -> dict[
                 stats["pricing.created"] += 1
             for field, column in PRICING_FIELD_MAP.items():
                 value = costs[field]
-                if value is not None and getattr(record, column) != value:
+                if value is None:
+                    continue
+                # 列精度 Numeric(18,4)：先按列精度量化，避免"写入-四舍五入-再比较"造成重复改写
+                value = Decimal(str(value)).quantize(Decimal("0.0001"))
+                if getattr(record, column) != value:
                     setattr(record, column, value)
                     stats[f"pricing.{column}"] += 1
             parts = [PRICING_REMARK_PREFIX]
@@ -1204,10 +1221,12 @@ async def _audit(dump: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
             if bom:
                 bom_expected[key] = f"BOM:{bom}"
         order_index = {(o.order_no, o.line_no): o for o in orders}
-        bom_mismatch = [
-            key for key, expected in bom_expected.items()
-            if key not in order_index or order_index[key].remark != expected
-        ]
+        bom_mismatch = []
+        for key, expected in bom_expected.items():
+            order_no, line_no = key.split("#", 1)
+            order = order_index.get((order_no, line_no))
+            if order is None or order.remark != expected:
+                bom_mismatch.append(key)
         quote_remarks: dict[str, str] = {}
         for row in dump["quote_library"]:
             remark = _s(row.get("remarks"))
