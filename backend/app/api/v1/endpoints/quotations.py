@@ -27,7 +27,7 @@ from app.schemas.pricing import (
     QuotationUpdate,
 )
 from app.services import approval as approval_service
-from app.services import company_code, email_service, export_excel, storage
+from app.services import company_code, email_service, export_excel, storage, system_config
 from app.services import pdf as pdf_service
 from app.services import pricing as pricing_service
 from app.services.data_scope import apply_data_scope
@@ -215,6 +215,10 @@ async def create_quotation(
 
     data = payload.model_dump(exclude_unset=True)
     items = data.pop("items", [])
+    if data.get("exchange_rate") is None:
+        data["exchange_rate"] = await system_config.get_float(
+            db, pricing_service.EXCHANGE_RATE_CONFIG_KEY, pricing_service.DEFAULT_EXCHANGE_RATE
+        )
     quotation = Quotation(
         **data,
         quotation_no=await next_number("quotation"),
@@ -264,8 +268,11 @@ async def create_from_pricing(
         .all()
     )
 
-    # M2.5-D4：汇率在报价创建时快照（默认 7.25）；M2.5-D2：最终价 = base_cost×(1+利润率)×折扣率，
-    # 由核价生成时按最终总价摊到单位价，并沿用核价的折扣率。
+    # M2.5-D4：汇率在报价创建时快照（16-10 配置项 pricing.exchange_rate，默认 7.25）；
+    # M2.5-D2：最终价 = base_cost×(1+利润率)×折扣率，由核价生成时按最终总价摊到单位价，并沿用核价的折扣率。
+    exchange_rate = await system_config.get_float(
+        db, pricing_service.EXCHANGE_RATE_CONFIG_KEY, pricing_service.DEFAULT_EXCHANGE_RATE
+    )
     total_qty = float(sum(float(i.quantity or 0) for i in inquiry_items) or 1)
     unit_price = _allocate_unit_price(
         pricing.final_price or pricing.suggested_price or pricing.floor_price or 0,
@@ -280,7 +287,7 @@ async def create_from_pricing(
         pricing_id=pricing.id,
         quotation_no=await next_number("quotation"),
         currency=pricing.currency,
-        exchange_rate=pricing_service.DEFAULT_EXCHANGE_RATE,
+        exchange_rate=exchange_rate,
         discount_rate=float(pricing.discount_rate or 1),
         incoterm=payload.incoterm,
         payment_terms=payload.payment_terms,
@@ -381,8 +388,16 @@ async def submit_quotation(
     if not quotation.items:
         raise ApiError(message="报价单至少需要一条明细", http_status=400)
 
-    # M2.6-D1：折扣率三档审批，=1 免审直接放行。
-    steps = approval_service.steps_for("QUOTATION", quotation.discount_rate)
+    # M2.6-D1：折扣率三档审批，=1 免审直接放行；金额门槛为可配置附加条件（默认关闭）。
+    amount_threshold_enabled, amount_threshold = await approval_service.load_amount_threshold(db)
+    amount = float(quotation.total_amount or 0)
+    steps = approval_service.steps_for(
+        "QUOTATION",
+        quotation.discount_rate,
+        amount,
+        amount_threshold_enabled=amount_threshold_enabled,
+        amount_threshold=amount_threshold,
+    )
     if not steps:
         quotation.status = "APPROVED"
         quotation.approved_by = current.id
@@ -407,10 +422,12 @@ async def submit_quotation(
         biz_id=quotation.id,
         biz_no=quotation.quotation_no,
         title=f"报价审批 {quotation.quotation_no}",
-        amount=float(quotation.total_amount or 0),
+        amount=amount,
         currency=quotation.currency,
         applicant=current,
         discount_rate=quotation.discount_rate,
+        amount_threshold_enabled=amount_threshold_enabled,
+        amount_threshold=amount_threshold,
     )
     quotation.status = "PENDING_APPROVAL"
     if quotation.opportunity_id:

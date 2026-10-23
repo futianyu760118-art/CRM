@@ -105,6 +105,19 @@ DEFAULT_CONFIGS: list[tuple[str, str, str, str]] = [
     ("quotation.valid_days", "30", "quotation", "报价单默认有效期（天）"),
     ("quotation.default_currency", "RMB", "quotation", "报价单默认币种"),
     ("pricing.default_margin", "0.25", "pricing", "核价默认目标利润率"),
+    ("pricing.exchange_rate", "7.25", "pricing", "16-10 汇率（单一参数人工维护，报价创建时快照）"),
+    (
+        "approval.discount_amount_threshold_enabled",
+        "false",
+        "approval",
+        "折扣金额门槛开关（M2.6-D1 附加条件，默认关闭）",
+    ),
+    (
+        "approval.discount_amount_threshold",
+        "50000",
+        "approval",
+        "折扣金额门槛（开启后金额超过门槛自动升一级审批）",
+    ),
 ]
 
 DEFAULT_SEQUENCES: list[tuple[str, str, str, str]] = [
@@ -310,7 +323,8 @@ DEFAULT_PRICING_RULES: list[dict[str, Any]] = [
         "code": "RULE-EU",
         "name": "欧洲市场系数 1.05",
         "conditions": {"country": {"in": ["Germany", "France", "Italy", "Spain", "Netherlands"]}},
-        "actions": {"price_multiplier": 1.05},
+        # M2.5-D2 后规则只调利润率：原 price_multiplier=1.05 等效转换为 margin_delta=+0.05。
+        "actions": {"margin_delta": 0.05},
         "priority": 80,
     },
 ]

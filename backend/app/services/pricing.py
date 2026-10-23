@@ -13,7 +13,10 @@ M2.5 口径（签批 D1~D5=A）：
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 COST_FIELDS = (
     "material_cost",
@@ -49,6 +52,8 @@ COST_LABELS = {
 
 DEFAULT_PROFIT_RATE = 0.2
 DEFAULT_DISCOUNT_RATE = 1.0
+#: 16-10：汇率单一参数人工维护（``system_config``），报价创建时取值快照。
+EXCHANGE_RATE_CONFIG_KEY = "pricing.exchange_rate"
 DEFAULT_EXCHANGE_RATE = 7.25
 #: 历史别名，保持向后兼容。
 DEFAULT_MARGIN = DEFAULT_PROFIT_RATE
@@ -102,6 +107,8 @@ def apply_rules(rules: list[Any], context: dict[str, Any], profit_rate: float) -
         if not _match(rule.conditions, context):
             continue
         actions = rule.actions or {}
+        if "price_multiplier" in actions:
+            logger.warning("核价规则 %s 的 price_multiplier 已废弃并被忽略，请改用 margin_delta", rule.code)
         if "margin" in actions:
             profit_rate = float(actions["margin"])
         if "margin_delta" in actions:

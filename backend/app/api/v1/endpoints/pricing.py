@@ -264,7 +264,15 @@ async def submit_pricing(
         raise ApiError(message=f"当前状态 {record.status} 不可提交", http_status=400)
     inquiry = await get_or_404(db, Inquiry, record.inquiry_id, "询价单")
 
-    steps = approval_service.steps_for("PRICING", record.discount_rate)
+    amount_threshold_enabled, amount_threshold = await approval_service.load_amount_threshold(db)
+    amount = float(record.total_cost or 0)
+    steps = approval_service.steps_for(
+        "PRICING",
+        record.discount_rate,
+        amount,
+        amount_threshold_enabled=amount_threshold_enabled,
+        amount_threshold=amount_threshold,
+    )
     if not steps:
         # M2.6-D1：折扣率 =1 免审，直接放行。
         await _apply_pricing_approved(db, record, current)
@@ -281,10 +289,12 @@ async def submit_pricing(
         biz_id=record.id,
         biz_no=f"{inquiry.inquiry_no}-V{record.version}",
         title=f"核价审批 {inquiry.inquiry_no} V{record.version}",
-        amount=float(record.total_cost or 0),
+        amount=amount,
         currency=record.currency,
         applicant=current,
         discount_rate=record.discount_rate,
+        amount_threshold_enabled=amount_threshold_enabled,
+        amount_threshold=amount_threshold,
     )
     record.status = "PENDING_APPROVAL"
     await db.commit()
