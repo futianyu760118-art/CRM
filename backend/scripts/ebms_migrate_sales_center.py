@@ -12,10 +12,15 @@
 
     python /tmp/ebms_migrate_sales_center.py extract --ebms-db /data/sales.db --dump /tmp/ebms_dump.json
     python /tmp/ebms_migrate_sales_center.py migrate --dump /tmp/ebms_dump.json --direct --batch-size 500
-    python /tmp/ebms_migrate_sales_center.py verify  --dump /tmp/ebms_dump.json
+    python /tmp/ebms_migrate_sales_center.py link    --dump /tmp/ebms_dump.json
+    python /tmp/ebms_migrate_sales_center.py repair  --dump /tmp/ebms_dump.json
+    python /tmp/ebms_migrate_sales_center.py audit   --dump /tmp/ebms_dump.json
 
 ``migrate`` 幂等：同一快照重复执行时，事件指纹一致，入站层按 ``M05:{event_type}:{object_id}:{fingerprint}``
 直接返回 duplicate，不新增业务记录。
+
+``repair`` 为 PAND-304 按《R1–R4 口径确认书》对已迁入数据做的就地修正，直接重建目标值、值相同不写，
+不构造入站事件（``integration_log`` 不增长）；重复执行 ``changes`` 为空。``migrate`` 保持首轮快照语义不变。
 """
 
 from __future__ import annotations
@@ -620,6 +625,684 @@ async def _verify(dump: dict[str, list[dict[str, Any]]], events: list[dict[str, 
     return result
 
 
+# ================================================================ PAND-304 修正确认口径（R1–R4）
+#
+# 数据已由 ``migrate`` 迁入，本段在现网就地修正，不再构造入站事件（迁移日志不增长）：
+#   R1 报价库证书等级：字典扩展（见 state_machine），「??」置空，97 条不合并；
+#   R2 客户身份：按 customer_code 归并/拆分，``name="/"`` 就地改名保留 UUID；
+#   R3 字段补迁：联系人→contact、销售员/客户备注→company.remark、BOM→sales_order.remark、
+#      报价备注→quote_library.remark、询价成本→pricing_record；
+#   R4 样品状态：open→sent，日期不动。
+# 所有写入均为「按源快照重建目标值 + 值相同不写」，重复执行 changed=0。
+
+CONTACT_PLACEHOLDERS = {"/", "／"}
+QUOTE_CERT_FIX = {"??": ""}
+
+#: R3 询价成本 → pricing_record 语义一一对应列
+PRICING_FIELD_MAP: dict[str, str] = {
+    "material_cost": "material_cost",
+    "base_cost": "base_cost",
+    "final_price": "final_price",
+    "discount_rate": "discount_rate",
+    "estimated_loss": "loss_cost",
+    "profit_rate": "target_margin",
+    "quoted_price": "suggested_price",
+}
+#: 无对应列的成本字段 → pricing_record.remark（口径确认书 §四：值不得丢失）
+PRICING_REMARK_FIELDS = ["process_cost", "accessory_cost", "quoted_price_usd"]
+PRICING_REMARK_PREFIX = "EBMS存量迁移"
+
+
+def _clean_contact(value: Any) -> str | None:
+    text = _s(value)
+    return None if text in CONTACT_PLACEHOLDERS else text
+
+
+def _display_name(rows: list[dict[str, Any]], code: str | None) -> str:
+    """实体显示名：占位名取编码；乱码变体优先可读名；同码多名取 updated_at 最新行。"""
+    names = [n for n in (_s(r.get("name")) for r in rows) if n]
+    non_placeholder = [n for n in names if n not in CONTACT_PLACEHOLDERS]
+    if not non_placeholder:
+        return code or (names[0] if names else "")
+    readable = [n for n in non_placeholder if "�" not in n]
+    pool = set(readable or non_placeholder)
+    chosen = None
+    for row in sorted(rows, key=_updated_key):
+        name = _s(row.get("name"))
+        if name in pool:
+            chosen = name
+    return chosen or sorted(pool)[0]
+
+
+def _contact_signature(rows: list[dict[str, Any]]) -> frozenset[str]:
+    values: set[str] = set()
+    for row in rows:
+        for wire in ("phone", "wechat", "email"):
+            value = _clean_contact(row.get(wire))
+            if value:
+                values.add(f"{wire}:{value}")
+    return frozenset(values)
+
+
+def _customer_entities(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按确认书 §三 建立客户身份：编码优先；无编码按名称；同名跨编码仅联系人标识全同才合并。"""
+    by_code: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_name: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        code = _s(row.get("customer_code"))
+        if code:
+            by_code[code].append(row)
+        else:
+            by_name[_s(row.get("name")) or ""].append(row)
+
+    entities = [{"codes": [code], "rows": group} for code, group in by_code.items()]
+    entities += [{"codes": [], "rows": group} for group in by_name.values()]
+
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for ent in entities:
+        code = ent["codes"][0] if ent["codes"] else None
+        grouped[_display_name(ent["rows"], code)].append(ent)
+
+    merged: list[dict[str, Any]] = []
+    for group in grouped.values():
+        if len(group) > 1 and all(ent["codes"] for ent in group):
+            signatures = {_contact_signature(ent["rows"]) for ent in group}
+            if len(signatures) == 1:
+                only = next(iter(signatures))
+                if only:
+                    merged.append(
+                        {
+                            "codes": [c for ent in group for c in ent["codes"]],
+                            "rows": [row for ent in group for row in ent["rows"]],
+                        }
+                    )
+                    continue
+        merged.extend(group)
+
+    for ent in merged:
+        primary_code = ent["codes"][0] if ent["codes"] else None
+        ent["primary_code"] = primary_code
+        ent["name"] = _display_name(ent["rows"], primary_code)
+    return merged
+
+
+def _union_wires(rows: list[dict[str, Any]], wires: list[str]) -> dict[str, str]:
+    """非空并集；同一字段多值时取 updated_at 最新行。"""
+    out: dict[str, str] = {}
+    for row in sorted(rows, key=_updated_key):
+        for wire in wires:
+            value = _s(row.get(wire))
+            if value:
+                out[wire] = value
+    return out
+
+
+def _customer_remark(rows: list[dict[str, Any]]) -> str | None:
+    sales: list[str] = []
+    remarks: list[str] = []
+    for row in sorted(rows, key=_updated_key):
+        person = _s(row.get("sales_person"))
+        if person and person not in sales:
+            sales.append(person)
+        text = _s(row.get("remarks"))
+        if text and text not in remarks:
+            remarks.append(text)
+    parts = [f"原销售员：{person}" for person in sales] + remarks
+    return "\n".join(parts) or None
+
+
+def _customer_values(entity: dict[str, Any]) -> dict[str, Any]:
+    union = _union_wires(entity["rows"], CUSTOMER_WIRES)
+    level = union.get("customer_level")
+    if level in CUSTOMER_LEVEL_MAP:
+        level = CUSTOMER_LEVEL_MAP[level]
+    status = union.get("customer_status")
+    if status in CUSTOMER_STATUS_MAP:
+        status = CUSTOMER_STATUS_MAP[status]
+    source = union.get("customer_source")
+    if not source:
+        for row in sorted(entity["rows"], key=_updated_key):
+            source = _s(row.get("source"))
+            if source:
+                break
+    return {
+        "name": entity["name"],
+        "former_name": union.get("former_name"),
+        "parent_code": union.get("parent_code"),
+        "customer_level": level,
+        "sales_mode": union.get("sales_mode"),
+        "customer_status": status,
+        "decision_maker": union.get("decision_maker"),
+        "decision_maker_position": union.get("decision_maker_position"),
+        "decision_core_need": union.get("decision_core_need"),
+        "last_trade_year": union.get("last_trade_year"),
+        "invoice_title": union.get("invoice_title"),
+        "tax_id": union.get("tax_id"),
+        "bank_name": union.get("bank_name"),
+        "bank_account": union.get("bank_account"),
+        "address": union.get("address"),
+        "country_region": union.get("country_region"),
+        "source": source,
+        "website": union.get("website"),
+        "remark": _customer_remark(entity["rows"]),
+    }
+
+
+def _customer_contacts(entity: dict[str, Any]) -> list[dict[str, Any]]:
+    contacts: list[dict[str, Any]] = []
+    seen: set[tuple[str, str | None, str | None, str | None]] = set()
+    for row in sorted(entity["rows"], key=_updated_key):
+        person = _clean_contact(row.get("contact_person")) or _clean_contact(row.get("contact"))
+        phone = _clean_contact(row.get("phone"))
+        wechat = _clean_contact(row.get("wechat"))
+        email = _clean_contact(row.get("email"))
+        if not any((person, phone, wechat, email)):
+            continue
+        name = person or entity["name"]
+        key = (name, phone, wechat, email)
+        if key in seen:
+            continue
+        seen.add(key)
+        contacts.append(
+            {
+                "name": name,
+                "phone": phone,
+                "wechat": wechat,
+                "email": email,
+                "position": _s(row.get("contact_position")),
+                "whatsapp": _s(row.get("whatsapp")),
+                "skype": _s(row.get("skype")),
+                "other_im": _s(row.get("other_im")),
+            }
+        )
+    return contacts
+
+
+def _key_text(value: Any) -> str:
+    return str(value if value is not None else "").replace("#", "~")
+
+
+def _set_if_diff(obj: Any, attr: str, value: Any, stats: Counter, tag: str) -> None:
+    if value is None:
+        return
+    if getattr(obj, attr) != value:
+        setattr(obj, attr, value)
+        stats[f"{tag}.{attr}"] += 1
+
+
+async def _company_has_refs(db: Any, company_id: Any) -> bool:
+    from sqlalchemy import text
+
+    row = await db.execute(
+        text(
+            "SELECT (SELECT count(*) FROM contact WHERE company_id = :id)"
+            " + (SELECT count(*) FROM inquiry WHERE company_id = :id)"
+            " + (SELECT count(*) FROM sales_order WHERE company_id = :id)"
+            " + (SELECT count(*) FROM sample WHERE company_id = :id)"
+            " + (SELECT count(*) FROM quotation WHERE company_id = :id)"
+            " + (SELECT count(*) FROM opportunity WHERE company_id = :id)"
+            " + (SELECT count(*) FROM business_code WHERE company_id = :id)"
+            " + (SELECT count(*) FROM email_thread WHERE company_id = :id)"
+        ),
+        {"id": company_id},
+    )
+    return int(row.scalar_one()) > 0
+
+
+async def _upsert_contacts(db: Any, company: Any, desired: list[dict[str, Any]], stats: Counter) -> None:
+    from sqlalchemy import select
+
+    from app.models.business import Contact
+
+    existing = list(
+        (
+            await db.execute(select(Contact).where(Contact.company_id == company.id, Contact.deleted_at.is_(None)))
+        ).scalars()
+    )
+    by_key = {(c.name, c.phone, c.wechat, c.email): c for c in existing}
+    records = []
+    for item in desired:
+        key = (item["name"], item["phone"], item["wechat"], item["email"])
+        contact = by_key.get(key)
+        if contact is None:
+            contact = Contact(company_id=company.id, name=item["name"], is_primary=False)
+            db.add(contact)
+            existing.append(contact)
+            by_key[key] = contact
+            stats["contact.created"] += 1
+        else:
+            stats["contact.matched"] += 1
+        for attr in ("position", "whatsapp", "skype", "other_im", "phone", "wechat", "email"):
+            value = item[attr]
+            if value is not None and getattr(contact, attr) != value:
+                setattr(contact, attr, value)
+                stats[f"contact.{attr}"] += 1
+        records.append(contact)
+
+    if not records:
+        return
+    scored = sorted(
+        records,
+        key=lambda c: (
+            -sum(1 for v in (c.name, c.phone, c.wechat, c.email, c.position) if v),
+            records.index(c),
+        ),
+    )
+    primary = scored[0]
+    for contact in records:
+        want = contact is primary
+        if contact.is_primary != want:
+            contact.is_primary = want
+            stats["contact.primary"] += 1
+
+
+async def _repair(dump: dict[str, list[dict[str, Any]]], dry_run: bool) -> dict[str, Any]:
+    from sqlalchemy import func, select
+
+    from app.db.session import async_session_factory
+    from app.models.business import Company, Inquiry
+    from app.models.integration import IntegrationLog
+    from app.models.pricing import PricingRecord
+    from app.models.sales import QuoteLibrary, SalesOrder, Sample
+
+    stats: Counter = Counter()
+    async with async_session_factory() as db:
+        # ---------------- R2 客户：编码身份 + 字段并集 + 占位改名 ----------------
+        companies = list((await db.execute(select(Company).where(Company.deleted_at.is_(None)))).scalars())
+        by_code = {c.code: c for c in companies}
+        by_name: dict[str, list[Any]] = defaultdict(list)
+        for company in companies:
+            by_name[company.name].append(company)
+
+        entities = _customer_entities(dump["customers"])
+        stats["customer.entities"] = len(entities)
+        processed: set[Any] = set()
+
+        for entity in entities:
+            rows = entity["rows"]
+            name = entity["name"]
+            primary_code = entity["primary_code"]
+
+            company = None
+            for code in entity["codes"]:
+                if code in by_code:
+                    company = by_code[code]
+                    break
+            if company is None:
+                candidates = [c for c in by_name.get(name, []) if c.id not in processed]
+                if entity["codes"]:
+                    candidates = [c for c in candidates if (c.code or "").startswith("EBMS-C")]
+                if candidates:
+                    company = candidates[0]
+
+            if company is None:
+                if primary_code:
+                    code = primary_code
+                else:
+                    rep_id = _int(max(rows, key=_updated_key).get("id")) or 0
+                    code = f"EBMS-C{rep_id:06d}"
+                company = Company(
+                    code=code,
+                    name=name,
+                    status="ACTIVE",
+                    currency="USD",
+                    sync_status="SYNCED",
+                    external_id=name,
+                )
+                db.add(company)
+                await db.flush()
+                by_code[code] = company
+                by_name[name].append(company)
+                stats["customer.created"] += 1
+            else:
+                stats["customer.matched"] += 1
+
+            processed.add(company.id)
+            values = _customer_values(entity)
+            for attr, value in values.items():
+                _set_if_diff(company, attr, value, stats, "customer")
+
+            # 上一轮迁移按名称建档，编码冲突时加了 -EB{id} 后缀；按编码身份合并回主记录
+            if primary_code:
+                for extra in companies:
+                    if extra.id == company.id or extra.id in processed:
+                        continue
+                    if not (extra.code or "").startswith(f"{primary_code}-EB"):
+                        continue
+                    if await _company_has_refs(db, extra.id):
+                        stats["customer.merge_blocked_refs"] += 1
+                        continue
+                    await db.delete(extra)
+                    processed.add(extra.id)
+                    stats["customer.merged_duplicate"] += 1
+
+            await _upsert_contacts(db, company, _customer_contacts(entity), stats)
+
+        # ---------------- R1 报价库证书等级 ----------------
+        quotes = list(
+            (await db.execute(select(QuoteLibrary).where(QuoteLibrary.deleted_at.is_(None)))).scalars()
+        )
+        quote_index = {(q.external_model, q.certificate_level): q for q in quotes}
+        for row in dump["quote_library"]:
+            model = _s(row.get("external_model"))
+            if not model:
+                continue
+            source_cert = _s(row.get("certificate_level")) or ""
+            target_cert = QUOTE_CERT_FIX.get(source_cert, source_cert)
+            quote = quote_index.get((model, target_cert)) or quote_index.get((model, source_cert))
+            if quote is None:
+                stats["quote.missing"] += 1
+                continue
+            if quote.certificate_level != target_cert:
+                quote.certificate_level = target_cert
+                stats["quote.certificate_level"] += 1
+            external = f"{_key_text(model)}#{_key_text(target_cert)}"
+            if quote.external_id != external:
+                quote.external_id = external
+                stats["quote.external_id"] += 1
+            remark = _s(row.get("remarks"))
+            if remark and quote.remark != remark:
+                quote.remark = remark
+                stats["quote.remark"] += 1
+            quote_index[(model, target_cert)] = quote
+
+        # ---------------- R3 订单 BOM ----------------
+        orders = list((await db.execute(select(SalesOrder).where(SalesOrder.deleted_at.is_(None)))).scalars())
+        order_index = {(o.order_no, o.line_no): o for o in orders}
+        groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in dump["orders"]:
+            order_no = _s(row.get("order_no"))
+            if order_no:
+                groups[f"{order_no}#{_s(row.get('line_no')) or ''}"].append(row)
+        for key, group in groups.items():
+            rep = max(group, key=_updated_key)
+            bom = _s(rep.get("bom_no"))
+            if not bom:
+                continue
+            order_no, line_no = key.split("#", 1)
+            order = order_index.get((order_no, line_no))
+            if order is None:
+                stats["order.missing"] += 1
+                continue
+            remark = f"BOM:{bom}"
+            if order.remark != remark:
+                order.remark = remark
+                stats["order.remark"] += 1
+
+        # ---------------- R3 询价成本 → pricing_record ----------------
+        inquiries = list((await db.execute(select(Inquiry).where(Inquiry.deleted_at.is_(None)))).scalars())
+        inquiry_by_no = {i.inquiry_no: i for i in inquiries}
+        pricing_rows = list(
+            (await db.execute(select(PricingRecord).where(PricingRecord.deleted_at.is_(None)))).scalars()
+        )
+        pricing_by_inquiry: dict[Any, Any] = {}
+        max_version: Counter = Counter()
+        for record in pricing_rows:
+            max_version[record.inquiry_id] = max(max_version[record.inquiry_id], record.version)
+            if (record.remark or "").startswith(PRICING_REMARK_PREFIX):
+                pricing_by_inquiry[record.inquiry_id] = record
+
+        cost_fields = list(PRICING_FIELD_MAP) + PRICING_REMARK_FIELDS
+        for row in dump["inquiries"]:
+            serial = _s(row.get("serial_number"))
+            if not serial:
+                continue
+            costs = {field: _num(row.get(field)) for field in cost_fields}
+            if not any(value is not None and value > 0 for value in costs.values()):
+                continue
+            inquiry = inquiry_by_no.get(serial)
+            if inquiry is None:
+                stats["pricing.missing_inquiry"] += 1
+                continue
+            record = pricing_by_inquiry.get(inquiry.id)
+            if record is None:
+                version = max_version[inquiry.id] + 1
+                record = PricingRecord(
+                    inquiry_id=inquiry.id,
+                    version=version,
+                    status="DRAFT",
+                    currency="RMB",
+                    discount_rate=1,
+                )
+                db.add(record)
+                pricing_by_inquiry[inquiry.id] = record
+                max_version[inquiry.id] = version
+                stats["pricing.created"] += 1
+            for field, column in PRICING_FIELD_MAP.items():
+                value = costs[field]
+                if value is not None and getattr(record, column) != value:
+                    setattr(record, column, value)
+                    stats[f"pricing.{column}"] += 1
+            parts = [PRICING_REMARK_PREFIX]
+            for field in PRICING_REMARK_FIELDS:
+                value = costs[field]
+                if value is not None:
+                    parts.append(f"{field}={value:g}")
+            remark = "；".join(parts)
+            if record.remark != remark:
+                record.remark = remark
+                stats["pricing.remark"] += 1
+
+        # ---------------- R4 样品状态 ----------------
+        samples = list((await db.execute(select(Sample).where(Sample.deleted_at.is_(None)))).scalars())
+        sample_by_no = {s.sample_no: s for s in samples}
+        for row in dump["samples"]:
+            sample_no = _s(row.get("sample_no"))
+            sample = sample_by_no.get(sample_no)
+            if sample is None:
+                stats["sample.missing"] += 1
+                continue
+            if sample.status != "sent":
+                sample.status = "sent"
+                stats["sample.status"] += 1
+
+        log_count = int((await db.execute(select(func.count()).select_from(IntegrationLog))).scalar_one())
+
+        if dry_run:
+            await db.rollback()
+        else:
+            await db.commit()
+
+    return {"dry_run": dry_run, "changes": dict(sorted(stats.items())), "integration_log": log_count}
+
+
+async def _audit(dump: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """修正后对账：以源快照为基线逐项复核 CRM 现网。"""
+    from collections import Counter as _Counter
+
+    from sqlalchemy import func, select
+
+    from app.db.session import async_session_factory
+    from app.domain.state_machine import QUOTE_LIBRARY_CERTIFICATE_LEVELS
+    from app.models.business import Company, Contact, Inquiry
+    from app.models.integration import IntegrationLog
+    from app.models.pricing import PricingRecord
+    from app.models.sales import QuoteLibrary, SalesOrder, Sample
+
+    source = {key: len(rows) for key, rows in dump.items()}
+    entities = _customer_entities(dump["customers"])
+    entity_names = _Counter(ent["name"] for ent in entities)
+    entity_codes = {code for ent in entities for code in ent["codes"]}
+    entity_remarks_by_code: dict[str, set[str]] = {}
+    entity_remarks_by_name: dict[str, set[str]] = {}
+    for ent in entities:
+        texts = {_s(r.get("remarks")) for r in ent["rows"]} - {None}
+        if not texts:
+            continue
+        if ent["primary_code"]:
+            entity_remarks_by_code[ent["primary_code"]] = texts
+        else:
+            entity_remarks_by_name[ent["name"]] = texts
+
+    async with async_session_factory() as db:
+        companies = list((await db.execute(select(Company).where(Company.deleted_at.is_(None)))).scalars())
+        contacts = list((await db.execute(select(Contact).where(Contact.deleted_at.is_(None)))).scalars())
+        quotes = list((await db.execute(select(QuoteLibrary).where(QuoteLibrary.deleted_at.is_(None)))).scalars())
+        orders = list((await db.execute(select(SalesOrder).where(SalesOrder.deleted_at.is_(None)))).scalars())
+        samples = list((await db.execute(select(Sample).where(Sample.deleted_at.is_(None)))).scalars())
+        inquiries = list((await db.execute(select(Inquiry).where(Inquiry.deleted_at.is_(None)))).scalars())
+        pricing = list(
+            (await db.execute(select(PricingRecord).where(PricingRecord.deleted_at.is_(None)))).scalars()
+        )
+        log_count = int((await db.execute(select(func.count()).select_from(IntegrationLog))).scalar_one())
+
+        company_ids = {c.id for c in companies}
+        migration_companies = [
+            c
+            for c in companies
+            if c.code in entity_codes
+            or c.name in entity_names
+            or (c.code or "").startswith("EBMS-C")
+        ]
+        placeholder_codes = {
+            _s(r.get("customer_code"))
+            for r in dump["customers"]
+            if _s(r.get("name")) in CONTACT_PLACEHOLDERS and _s(r.get("customer_code"))
+        }
+        placeholder_present = {
+            c.code for c in companies if c.code in placeholder_codes
+        }
+        contact_company_ids = {c.company_id for c in contacts}
+        contact_cov = {
+            "any": len(contact_company_ids & {c.id for c in migration_companies}),
+            "phone": len({c.company_id for c in contacts if c.phone}),
+            "wechat": len({c.company_id for c in contacts if c.wechat}),
+            "email": len({c.company_id for c in contacts if c.email}),
+            "name_contact_person": len(
+                {
+                    c.company_id
+                    for c in contacts
+                    if c.name in {_clean_contact(r.get("contact_person")) for r in dump["customers"]}
+                }
+            ),
+        }
+        cert_dist = _Counter(q.certificate_level for q in quotes)
+        multi_level = _Counter(q.external_model for q in quotes)
+        price_spreads = {
+            model: sorted(
+                {
+                    str(q.price_rmb)
+                    for q in quotes
+                    if q.external_model == model and q.price_rmb is not None
+                }
+            )
+            for model, count in multi_level.items()
+            if count > 1
+        }
+        sample_dist = _Counter(s.status for s in samples)
+        sample_dates = {s.sample_no: (str(s.send_date) if s.send_date else None) for s in samples}
+        source_send = {_s(r.get("sample_no")): _iso_date(r.get("send_date")) for r in dump["samples"]}
+        send_mismatch = [no for no, value in source_send.items() if sample_dates.get(no) != value]
+        bom_expected = {}
+        groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in dump["orders"]:
+            order_no = _s(row.get("order_no"))
+            if order_no:
+                groups[f"{order_no}#{_s(row.get('line_no')) or ''}"].append(row)
+        for key, group in groups.items():
+            bom = _s(max(group, key=_updated_key).get("bom_no"))
+            if bom:
+                bom_expected[key] = f"BOM:{bom}"
+        order_index = {(o.order_no, o.line_no): o for o in orders}
+        bom_mismatch = [
+            key for key, expected in bom_expected.items()
+            if key not in order_index or order_index[key].remark != expected
+        ]
+        quote_remarks: dict[str, str] = {}
+        for row in dump["quote_library"]:
+            remark = _s(row.get("remarks"))
+            if not remark:
+                continue
+            cert = _s(row.get("certificate_level")) or ""
+            key = f"{_s(row.get('external_model'))}#{QUOTE_CERT_FIX.get(cert, cert)}"
+            quote_remarks[key] = remark
+        quote_index = {f"{q.external_model}#{q.certificate_level}": q for q in quotes}
+        quote_remark_missing = [
+            key for key, remark in quote_remarks.items()
+            if key not in quote_index or quote_index[key].remark != remark
+        ]
+        pricing_by_inquiry = {p.inquiry_id: p for p in pricing}
+        inquiry_by_no = {i.inquiry_no: i for i in inquiries}
+        cost_fields = list(PRICING_FIELD_MAP) + PRICING_REMARK_FIELDS
+        pricing_expected = 0
+        pricing_missing = []
+        for row in dump["inquiries"]:
+            serial = _s(row.get("serial_number"))
+            costs = {field: _num(row.get(field)) for field in cost_fields}
+            if not any(value is not None and value > 0 for value in costs.values()):
+                continue
+            pricing_expected += 1
+            inquiry = inquiry_by_no.get(serial)
+            record = pricing_by_inquiry.get(inquiry.id) if inquiry else None
+            if record is None:
+                pricing_missing.append(serial)
+                continue
+            for field, column in PRICING_FIELD_MAP.items():
+                value = costs[field]
+                if value is not None and abs(float(getattr(record, column) or 0) - value) > 0.0001:
+                    pricing_missing.append(f"{serial}:{column}")
+        remark_counts = {
+            "sales_person": sum(1 for c in companies if "原销售员：" in (c.remark or "")),
+            "customer_remarks": sum(
+                1
+                for c in companies
+                if (
+                    c.code in entity_remarks_by_code
+                    and any(text in (c.remark or "") for text in entity_remarks_by_code[c.code])
+                )
+                or (
+                    c.name in entity_remarks_by_name
+                    and any(text in (c.remark or "") for text in entity_remarks_by_name[c.name])
+                )
+            ),
+        }
+
+        return {
+            "source_rows": source,
+            "crm": {
+                "company_total": len(companies),
+                "company_migration": len(migration_companies),
+                "contact": len(contacts),
+                "quote_library": len(quotes),
+                "sales_order": len(orders),
+                "sample": len(samples),
+                "inquiry": len(inquiries),
+                "pricing_record": len(pricing),
+                "integration_log": log_count,
+            },
+            "customer": {
+                "entities_expected": len(entities),
+                "placeholder_codes_expected": len(placeholder_codes),
+                "placeholder_codes_present": len(placeholder_present),
+                "placeholder_name_slash": sum(1 for c in companies if c.name in CONTACT_PLACEHOLDERS),
+                "duplicate_codes": [
+                    code for code, count in _Counter(c.code for c in companies).items() if count > 1
+                ],
+                "contact_coverage": contact_cov,
+                "remark_coverage": remark_counts,
+                "orphan_contact_company": len([c for c in contacts if c.company_id not in company_ids]),
+            },
+            "quote": {
+                "certificate_distribution": dict(cert_dist),
+                "invalid_values": [v for v in cert_dist if v not in QUOTE_LIBRARY_CERTIFICATE_LEVELS and v],
+                "price_spreads": price_spreads,
+                "remark_missing": quote_remark_missing,
+            },
+            "order": {"bom_expected": len(bom_expected), "bom_mismatch": len(bom_mismatch)},
+            "pricing": {"expected": pricing_expected, "missing_or_mismatch": pricing_missing},
+            "sample": {
+                "status": dict(sample_dist),
+                "send_date_mismatch": len(send_mismatch),
+                "pending": sample_dist.get("pending", 0),
+            },
+        }
+
+
+def _print_audit(report: dict[str, Any]) -> None:
+    print("\n## 修正后对账\n")
+    print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+
+
 def _print_verify(report: dict[str, Any]) -> None:
     print("\n## 对账结果\n")
     print("| 模块 | EBMS 源记录 | 去重后对象 | CRM 记录 | 匹配 | 缺失 | 多余* | 字段不一致 |")
@@ -666,6 +1349,15 @@ def main() -> None:
     p_link = sub.add_parser("link", help="按客户编码回填订单/询价/样品的公司外键")
     p_link.add_argument("--dry-run", action="store_true", help="只统计待回填行数，不写库")
 
+    p_repair = sub.add_parser("repair", help="按 PAND-304 确认口径就地修正 R1–R4（幂等，不写入站日志）")
+    p_repair.add_argument("--dump", required=True)
+    p_repair.add_argument("--dry-run", action="store_true", help="只统计变更，不提交")
+    p_repair.add_argument("--json-out", help="变更报告 JSON 输出路径")
+
+    p_audit = sub.add_parser("audit", help="按 PAND-304 确认口径对账修正结果")
+    p_audit.add_argument("--dump", required=True)
+    p_audit.add_argument("--json-out", help="对账 JSON 输出路径")
+
     args = parser.parse_args()
 
     if args.command == "extract":
@@ -676,6 +1368,25 @@ def main() -> None:
     if args.command == "link":
         counts = asyncio.run(_link_company_refs(args.dry_run))
         print(json.dumps({"dry_run": args.dry_run, "linked": counts}, ensure_ascii=False))
+        return
+
+    if args.command == "repair":
+        dump = load_dump(args.dump)
+        result = asyncio.run(_repair(dump, args.dry_run))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if args.json_out:
+            with open(args.json_out, "w", encoding="utf-8") as fh:
+                json.dump(result, fh, ensure_ascii=False, indent=2, default=str)
+        return
+
+    if args.command == "audit":
+        dump = load_dump(args.dump)
+        result = asyncio.run(_audit(dump))
+        _print_audit(result)
+        if args.json_out:
+            with open(args.json_out, "w", encoding="utf-8") as fh:
+                json.dump(result, fh, ensure_ascii=False, indent=2, default=str)
+            print(f"\nJSON 报告: {args.json_out}")
         return
 
     dump = load_dump(args.dump)

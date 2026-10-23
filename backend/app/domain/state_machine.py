@@ -150,7 +150,19 @@ CERTIFICATE_COMPLIANT: list[str] = ["是", "否"]
 INQUIRY_CERTIFICATE_LEVELS: list[str] = ["国标", "行标", "企标", "无证书"]
 
 # 报价库证书等级（AC-M3.3）
-QUOTE_LIBRARY_CERTIFICATE_LEVELS: list[str] = ["CE", "ROHS", "CCC", "UL", "ETL"]
+# PAND-304 / 口径确认书 §二：EBMS「标准等级」与 CRM「认证类型」不是同一维度，
+# 值域取两者并集，保真承接存量报价（国标 24 条为真实定价维度，不得置空）。
+QUOTE_LIBRARY_CERTIFICATE_LEVELS: list[str] = [
+    "CE",
+    "ROHS",
+    "CCC",
+    "UL",
+    "ETL",
+    "国标",
+    "行标",
+    "企标",
+    "无证书",
+]
 
 # 询价 11 态（AC-M2.7，对齐 EBMS）
 INQUIRY_STATUSES_V2: list[str] = [

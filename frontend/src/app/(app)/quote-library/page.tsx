@@ -14,7 +14,7 @@ import { formatDateTime, formatNumber } from '@/lib/format';
 import type { PageResult } from '@/types';
 import type { QuoteLibrary, QuoteStats } from '@/types/sales';
 
-const CERTIFICATE_LEVELS = ['CE', 'ROHS', 'CCC', 'UL', 'ETL'];
+const CERTIFICATE_LEVELS = ['CE', 'ROHS', 'CCC', 'UL', 'ETL', '国标', '行标', '企标', '无证书'];
 
 interface FormValues {
   external_model: string;

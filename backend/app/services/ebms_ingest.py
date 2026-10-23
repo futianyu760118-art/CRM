@@ -360,6 +360,13 @@ async def _find_object(
     db: AsyncSession, object_type: str, external_id: str, mapped: dict[str, Any]
 ) -> Any | None:
     model = _MODEL_BY_TYPE[object_type]
+    # 客户身份 = customer_code（PAND-304 R2 口径）；同名客户可能对应不同编码，须先按编码定位
+    if object_type == "Customer" and mapped.get("code"):
+        row = (
+            await db.execute(select(model).where(model.code == mapped["code"], model.deleted_at.is_(None)))
+        ).scalar_one_or_none()
+        if row is not None:
+            return row
     if external_id:
         row = (
             await db.execute(select(model).where(model.external_id == external_id, model.deleted_at.is_(None)))
@@ -367,15 +374,10 @@ async def _find_object(
         if row is not None:
             return row
     # 自然键兜底（external_id 尚未回填的存量/边界）
-    if object_type == "Customer":
-        if mapped.get("code"):
-            return (
-                await db.execute(select(model).where(model.code == mapped["code"], model.deleted_at.is_(None)))
-            ).scalar_one_or_none()
-        if mapped.get("name"):
-            return (
-                await db.execute(select(model).where(model.name == mapped["name"], model.deleted_at.is_(None)))
-            ).scalar_one_or_none()
+    if object_type == "Customer" and mapped.get("name"):
+        return (
+            await db.execute(select(model).where(model.name == mapped["name"], model.deleted_at.is_(None)))
+        ).scalar_one_or_none()
     if object_type == "Inquiry" and mapped.get("inquiry_no"):
         return (
             await db.execute(select(model).where(model.inquiry_no == mapped["inquiry_no"], model.deleted_at.is_(None)))
