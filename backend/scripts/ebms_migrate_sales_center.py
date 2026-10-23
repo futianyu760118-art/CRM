@@ -1179,17 +1179,19 @@ async def _audit(dump: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
         placeholder_present = {
             c.code for c in companies if c.code in placeholder_codes
         }
-        contact_company_ids = {c.company_id for c in contacts}
+        migration_ids = {c.id for c in migration_companies}
+        contact_company_ids = {c.company_id for c in contacts if c.company_id in migration_ids}
+        source_persons = {_clean_contact(r.get("contact_person")) for r in dump["customers"]}
         contact_cov = {
-            "any": len(contact_company_ids & {c.id for c in migration_companies}),
-            "phone": len({c.company_id for c in contacts if c.phone}),
-            "wechat": len({c.company_id for c in contacts if c.wechat}),
-            "email": len({c.company_id for c in contacts if c.email}),
+            "any": len(contact_company_ids),
+            "phone": len({c.company_id for c in contacts if c.company_id in migration_ids and c.phone}),
+            "wechat": len({c.company_id for c in contacts if c.company_id in migration_ids and c.wechat}),
+            "email": len({c.company_id for c in contacts if c.company_id in migration_ids and c.email}),
             "name_contact_person": len(
                 {
                     c.company_id
                     for c in contacts
-                    if c.name in {_clean_contact(r.get("contact_person")) for r in dump["customers"]}
+                    if c.company_id in migration_ids and c.name in source_persons
                 }
             ),
         }
