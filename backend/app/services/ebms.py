@@ -38,9 +38,10 @@ from app.core.config import settings
 from app.core.error_codes import ErrCode
 from app.core.exceptions import ApiError, NotFoundError
 from app.db.base import utcnow
+from app.models.business import Company, Inquiry
 from app.models.integration import IntegrationLog, IntegrationOutbox
 from app.models.pricing import Quotation
-from app.models.sales import SalesOrder
+from app.models.sales import Feedback, QuoteLibrary, SalesOrder, Sample
 from app.services.ebms_transport import DeliveryResult, EbmsTransport
 
 # 契约源系统：CRM = M05 销售自治（EBMS/docs/AEOS_V7.2_DATA_OWNERSHIP_V1.md）
@@ -62,6 +63,16 @@ _EVENT_ACTION: dict[str, str] = {
 OUTBOX_PENDING = "PENDING"
 OUTBOX_DONE = "DONE"
 OUTBOX_FAILED = "FAILED"
+
+#: Outbox biz_type -> 业务模型：投递终态回写 sync_status（PENDING 仅表示「本地变更未送达」）
+_BIZ_MODELS: dict[str, Any] = {
+    "COMPANY": Company,
+    "INQUIRY": Inquiry,
+    "QUOTE_LIBRARY": QuoteLibrary,
+    "ORDER": SalesOrder,
+    "SAMPLE": Sample,
+    "FEEDBACK": Feedback,
+}
 
 LOG_PENDING = "PENDING"
 LOG_SUCCESS = "SUCCESS"
@@ -518,6 +529,25 @@ async def _mark_outbox(row: IntegrationOutbox, *, status: str, retry: int | None
         row.processed_at = utcnow()
 
 
+async def _mark_entity_sync_status(db: AsyncSession, row: IntegrationOutbox, status: str) -> None:
+    """实体事件终态回写业务对象 sync_status，使「PENDING=未送达」语义成立（R2）。
+
+    只处理 AEOS_EVENT_V1；结果/异常通道没有对应业务对象。
+    """
+    if row.event_type != EVENT_ENTITY:
+        return
+    model = _BIZ_MODELS.get(row.biz_type)
+    if model is None:
+        return
+    obj = await db.get(model, row.biz_id)
+    if obj is None:
+        return
+    if hasattr(obj, "sync_status"):
+        obj.sync_status = status
+        if status == "SYNCED" and hasattr(obj, "last_sync_at"):
+            obj.last_sync_at = utcnow()
+
+
 async def _deliver_one(db: AsyncSession, row: IntegrationOutbox, transport: EbmsTransport) -> str:
     """投递单条 Outbox，返回结果标签：delivered/skipped/failed/dead_letter。"""
     action = _EVENT_ACTION.get(row.event_type)
@@ -541,6 +571,7 @@ async def _deliver_one(db: AsyncSession, row: IntegrationOutbox, transport: Ebms
 
     if log.status == LOG_SUCCESS:
         await _mark_outbox(row, status=OUTBOX_DONE)
+        await _mark_entity_sync_status(db, row, "SYNCED")
         return "skipped"
 
     result: DeliveryResult = await transport.deliver(
@@ -557,6 +588,7 @@ async def _deliver_one(db: AsyncSession, row: IntegrationOutbox, transport: Ebms
         log.error_message = None
         log.next_retry_at = None
         await _mark_outbox(row, status=OUTBOX_DONE)
+        await _mark_entity_sync_status(db, row, "SYNCED")
         return "delivered"
 
     log.retry_count += 1
@@ -565,11 +597,13 @@ async def _deliver_one(db: AsyncSession, row: IntegrationOutbox, transport: Ebms
         log.status = LOG_DEAD_LETTER
         log.next_retry_at = None
         await _mark_outbox(row, status=OUTBOX_FAILED, retry=log.retry_count)
+        await _mark_entity_sync_status(db, row, "PENDING")
         return "dead_letter"
 
     log.status = LOG_FAILED
     log.next_retry_at = _backoff(log.retry_count)
     await _mark_outbox(row, status=OUTBOX_PENDING, retry=log.retry_count)
+    await _mark_entity_sync_status(db, row, "PENDING")
     row.available_at = log.next_retry_at
     return "failed"
 
@@ -670,6 +704,7 @@ async def retry(db: AsyncSession, log_id: uuid.UUID, *, transport: EbmsTransport
     if outbox is not None:
         if result.ok:
             await _mark_outbox(outbox, status=OUTBOX_DONE, retry=log.retry_count)
+            await _mark_entity_sync_status(db, outbox, "SYNCED")
         elif log.status == LOG_DEAD_LETTER:
             await _mark_outbox(outbox, status=OUTBOX_FAILED, retry=log.retry_count)
         else:
@@ -718,8 +753,45 @@ async def _count_log(db: AsyncSession, action: str, status: str | None = None) -
     return int((await db.execute(stmt)).scalar_one())
 
 
+#: 对账口径下的 6 模块 -> 业务模型（对象名与 AEOS contract 一致）
+_RECONCILE_MODULES: dict[str, Any] = {
+    "Customer": Company,
+    "Inquiry": Inquiry,
+    "QuoteLibrary": QuoteLibrary,
+    "Order": SalesOrder,
+    "Sample": Sample,
+    "Feedback": Feedback,
+}
+
+
+async def _count_module(db: AsyncSession, model: Any) -> int:
+    stmt = select(func.count()).select_from(model).where(model.deleted_at.is_(None))
+    return int((await db.execute(stmt)).scalar_one())
+
+
+async def _count_entity_log(db: AsyncSession, status: str) -> int:
+    return int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(IntegrationLog)
+                .where(
+                    IntegrationLog.deleted_at.is_(None),
+                    IntegrationLog.system == "EBMS",
+                    IntegrationLog.action == ACTION_ENTITY,
+                    IntegrationLog.status == status,
+                )
+            )
+        ).scalar_one()
+    )
+
+
 async def reconcile(db: AsyncSession) -> dict[str, Any]:
-    """对账：产出（Outbox） vs 投递成功（Log），并按状态给出积压/失败量。"""
+    """对账：结果/异常/实体三条通道的产出与投递，以及 6 模块本地计数（R5）。
+
+    `event` 通道即 ``AEOS_EVENT_V1`` 回写事件：pending/failed/dead_letter 任一非零
+    都代表「CRM 已修改但 EBMS 未落库」，此时 `consistent=false`。
+    """
     result = {
         "produced": await _count_outbox(db, EVENT_RESULT),
         "delivered": await _count_log(db, ACTION_RESULT, LOG_SUCCESS),
@@ -732,6 +804,14 @@ async def reconcile(db: AsyncSession) -> dict[str, Any]:
         "pending": await _count_outbox(db, EVENT_EXCEPTION, OUTBOX_PENDING),
         "failed": await _count_outbox(db, EVENT_EXCEPTION, OUTBOX_FAILED),
     }
+    event = {
+        "produced": await _count_outbox(db, EVENT_ENTITY),
+        "delivered": await _count_outbox(db, EVENT_ENTITY, OUTBOX_DONE),
+        "pending": await _count_outbox(db, EVENT_ENTITY, OUTBOX_PENDING),
+        "failed": await _count_outbox(db, EVENT_ENTITY, OUTBOX_FAILED),
+        "dead_letter": await _count_entity_log(db, LOG_DEAD_LETTER),
+    }
+    modules = {name: await _count_module(db, model) for name, model in _RECONCILE_MODULES.items()}
     dead_letter = (
         await db.execute(
             select(func.count())
@@ -744,14 +824,52 @@ async def reconcile(db: AsyncSession) -> dict[str, Any]:
         )
     ).scalar_one()
 
+    # 未达终态的回写事件明细：直接指出「哪条对象的哪个事件没送达」，便于定位
+    stuck_rows = (
+        (
+            await db.execute(
+                select(IntegrationOutbox)
+                .where(
+                    IntegrationOutbox.deleted_at.is_(None),
+                    IntegrationOutbox.event_type == EVENT_ENTITY,
+                    IntegrationOutbox.status != OUTBOX_DONE,
+                )
+                .order_by(IntegrationOutbox.created_at)
+                .limit(50)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    issues = [
+        {
+            "outbox_id": str(row.id),
+            "biz_type": row.biz_type,
+            "biz_id": str(row.biz_id),
+            "object_type": (row.payload or {}).get("object_type"),
+            "object_id": (row.payload or {}).get("object_id"),
+            "event_type": (row.payload or {}).get("event_type"),
+            "status": row.status,
+            "retry_count": row.retry_count,
+        }
+        for row in stuck_rows
+    ]
+
     return {
         "checked_at": cn_now().isoformat(),
         "mode": settings.EBMS_DELIVERY_MODE,
         "result": result,
         "exception": exception,
+        "event": event,
         "dead_letter": int(dead_letter),
+        "modules": modules,
+        "modules_total": sum(modules.values()),
+        "issues": issues,
         "consistent": result["pending"] == 0
         and exception["pending"] == 0
         and result["failed"] == 0
-        and exception["failed"] == 0,
+        and exception["failed"] == 0
+        and event["pending"] == 0
+        and event["failed"] == 0
+        and event["dead_letter"] == 0,
     }

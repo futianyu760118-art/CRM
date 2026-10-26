@@ -91,6 +91,8 @@ services:
       TZ: Asia/Shanghai
     ports:
       - "${BACKEND_PORT:-8000}:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - backendstorage:/app/storage
       - backendvar:/app/var
@@ -107,6 +109,47 @@ services:
       timeout: 5s
       retries: 12
       start_period: 60s
+
+  # AEOS 回写投递 Worker（PAND-307 切流 / PAND-309 R4 持久化）：
+  # 与 backend 同镜像，Celery beat 每 60s 消费 integration_outbox 投递 EBMS。
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: crm-backend:local
+    container_name: crm-worker
+    restart: unless-stopped
+    command: ["celery", "-A", "app.worker.celery_app", "worker", "--beat", "--loglevel=info", "--concurrency=2"]
+    healthcheck:
+      disable: true
+    environment:
+      ENV: ${ENV:-dev}
+      DEBUG: ${DEBUG:-true}
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-please-change-in-production}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-120}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-crm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crm123456}
+      POSTGRES_DB: ${POSTGRES_DB:-crm}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: ${REDIS_DB:-0}
+      EBMS_DELIVERY_MODE: ${EBMS_DELIVERY_MODE:-spool}
+      EBMS_INGEST_URL: ${EBMS_INGEST_URL:-}
+      EBMS_INGEST_TOKEN: ${EBMS_INGEST_TOKEN:-}
+      EBMS_INBOUND_TOKEN: ${EBMS_INBOUND_TOKEN:-}
+      EBMS_SPOOL_DIR: /app/var/ebms-spool
+      TZ: Asia/Shanghai
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - backendvar:/app/var
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   frontend:
     build:

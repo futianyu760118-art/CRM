@@ -60,12 +60,33 @@ class ReconcileSideOut(BaseModel):
     failed: int
 
 
+class ReconcileEventOut(ReconcileSideOut):
+    """AEOS_EVENT_V1 回写通道：dead_letter 取自投递日志终态。"""
+
+    dead_letter: int
+
+
+class ReconcileIssueOut(BaseModel):
+    outbox_id: str
+    biz_type: str
+    biz_id: str
+    object_type: str | None = None
+    object_id: str | None = None
+    event_type: str | None = None
+    status: str
+    retry_count: int
+
+
 class EbmsReconcileOut(BaseModel):
     checked_at: str
     mode: str
     result: ReconcileSideOut
     exception: ReconcileSideOut
+    event: ReconcileEventOut
     dead_letter: int
+    modules: dict[str, int]
+    modules_total: int
+    issues: list[ReconcileIssueOut] = Field(default_factory=list)
     consistent: bool
 
 
