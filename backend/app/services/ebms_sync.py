@@ -302,6 +302,11 @@ def _key_payload(object_type: str, obj: Any) -> dict[str, Any]:
 
 async def emit_upsert(db: AsyncSession, object_type: str, obj: Any) -> dict[str, Any]:
     """对象创建/更新后，出站 upserted 事件。"""
+    if object_type == "Inquiry":
+        # 明细行由端点逐行 add，序列化前必须显式加载；异步会话中触发懒加载会 MissingGreenlet。
+        # 先 flush，确保刷新关系时不会丢掉尚未落库的字段修改。
+        await db.flush()
+        await db.refresh(obj, ["items"])
     return await ebms.emit_entity_event(
         db,
         object_type=object_type,

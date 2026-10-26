@@ -20,12 +20,12 @@ import pytest
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.models.business import Company
+from app.models.business import Company, Inquiry, InquiryItem
 from app.models.integration import IntegrationLog, IntegrationOutbox
 from app.models.pricing import Quotation
 from app.models.sales import SalesOrder
-from app.services import ebms
-from app.services.ebms_transport import EbmsTransport
+from app.services import ebms, ebms_sync
+from app.services.ebms_transport import DeliveryResult, EbmsTransport
 
 TEST_DB_URL = os.environ.get("CRM_TEST_DATABASE_URL")
 
@@ -43,10 +43,15 @@ async def _clean(session) -> None:
     """只清理本测试写入的数据。"""
     await session.execute(delete(IntegrationLog).where(IntegrationLog.system == "EBMS"))
     await session.execute(
-        delete(IntegrationOutbox).where(IntegrationOutbox.event_type.in_((ebms.EVENT_RESULT, ebms.EVENT_EXCEPTION)))
+        delete(IntegrationOutbox).where(
+            IntegrationOutbox.event_type.in_((ebms.EVENT_RESULT, ebms.EVENT_EXCEPTION, ebms.EVENT_ENTITY))
+        )
     )
     await session.execute(delete(Quotation).where(Quotation.quotation_no.like(f"{CODE_PREFIX}%")))
     await session.execute(delete(SalesOrder).where(SalesOrder.order_no.like(f"{CODE_PREFIX}%")))
+    inquiry_ids = select(Inquiry.id).where(Inquiry.inquiry_no.like(f"{CODE_PREFIX}%"))
+    await session.execute(delete(InquiryItem).where(InquiryItem.inquiry_id.in_(inquiry_ids)))
+    await session.execute(delete(Inquiry).where(Inquiry.inquiry_no.like(f"{CODE_PREFIX}%")))
     await session.execute(delete(Company).where(Company.code.like(f"{CODE_PREFIX}%")))
     await session.flush()
 
@@ -330,7 +335,80 @@ class TestPilotBDeliveryOverdue:
 # ---------------------------------------------------------------- 投递 / 重试 / 对账
 
 
+class TestEntityEmission:
+    async def test_inquiry_upsert_loads_items_before_serialization(self, session) -> None:
+        """明细行独立 add 后序列化，必须显式加载关系（否则异步懒加载 MissingGreenlet）。"""
+        inquiry = Inquiry(
+            inquiry_no=f"{CODE_PREFIX}INQ-{uuid.uuid4().hex[:6]}",
+            status="DRAFT",
+            customer_name="PAND163 询价客户",
+        )
+        session.add(inquiry)
+        await session.flush()
+        session.add(InquiryItem(inquiry_id=inquiry.id, product_model="PAND163-M1", quantity=2))
+        await session.flush()
+
+        out = await ebms_sync.emit_upsert(session, "Inquiry", inquiry)
+
+        assert out["created"] == 1
+        row = (
+            await session.execute(
+                select(IntegrationOutbox).where(IntegrationOutbox.event_type == ebms.EVENT_ENTITY)
+            )
+        ).scalars().first()
+        assert row.payload["event_type"] == "inquiry.upserted"
+        assert row.payload["payload"]["items"][0]["external_model"] == "PAND163-M1"
+
+
 class TestDelivery:
+    async def test_entity_event_delivers_inner_event_type(self, session) -> None:
+        """X-Event-Type 必须是契约体内事件类型（customer.upserted），而非 Outbox 包类型。"""
+        company = await _seed_company(session)
+        await ebms_sync.emit_upsert(session, "Customer", company)
+
+        class _Recorder:
+            mode = "http"
+
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def deliver(self, contract, *, event_type, contract_id, idempotency_key):
+                self.calls.append({"contract": contract, "event_type": event_type})
+                return DeliveryResult(
+                    ok=True, mode="http", target="(fake)", status_code=200, response={"result": "ok"}
+                )
+
+        recorder = _Recorder()
+        result = await ebms.deliver_pending(session, transport=recorder)
+
+        assert result["delivered"] == 1
+        assert recorder.calls[0]["event_type"] == "customer.upserted"
+        assert recorder.calls[0]["contract"]["event_type"] == "customer.upserted"
+
+    async def test_retry_entity_event_uses_inner_event_type(self, session) -> None:
+        company = await _seed_company(session)
+        await ebms_sync.emit_upsert(session, "Customer", company)
+        await ebms.deliver_pending(session, transport=EbmsTransport(mode="http", ingest_url=""))
+        log = (await _ebms_logs(session))[0]
+
+        class _Recorder:
+            mode = "http"
+
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def deliver(self, contract, *, event_type, contract_id, idempotency_key):
+                self.calls.append(event_type)
+                return DeliveryResult(
+                    ok=True, mode="http", target="(fake)", status_code=200, response={"result": "ok"}
+                )
+
+        recorder = _Recorder()
+        out = await ebms.retry(session, log.id, transport=recorder)
+
+        assert out["status"] == "SUCCESS"
+        assert recorder.calls == ["customer.upserted"]
+
     async def test_deliver_to_spool_marks_log_and_outbox(self, session, tmp_path: Path) -> None:
         company = await _seed_company(session)
         today = date(2026, 10, 7)

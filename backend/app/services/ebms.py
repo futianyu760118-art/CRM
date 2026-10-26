@@ -544,7 +544,10 @@ async def _deliver_one(db: AsyncSession, row: IntegrationOutbox, transport: Ebms
         return "skipped"
 
     result: DeliveryResult = await transport.deliver(
-        wire, event_type=row.event_type, contract_id=contract.contract_id, idempotency_key=key
+        wire,
+        event_type=wire.get("event_type") or row.event_type,
+        contract_id=contract.contract_id,
+        idempotency_key=key,
     )
     log.response_payload = result.to_dict()
     log.finished_at = utcnow()
@@ -640,7 +643,10 @@ async def retry(db: AsyncSession, log_id: uuid.UUID, *, transport: EbmsTransport
     wire = to_wire(contract)
     key = log.idempotency_key or _idempotency(log.action, contract.contract_id, wire)
     result = await transport.deliver(
-        wire, event_type=_event_of(log.action), contract_id=contract.contract_id, idempotency_key=key
+        wire,
+        event_type=wire.get("event_type") or _event_of(log.action),
+        contract_id=contract.contract_id,
+        idempotency_key=key,
     )
     log.retry_count += 1
     log.response_payload = result.to_dict()
