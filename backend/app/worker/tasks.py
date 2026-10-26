@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from app.db.session import async_session_factory
+from app.db.session import async_session_factory, engine
 from app.services import ebms
 from app.worker.celery_app import celery_app
 
@@ -24,4 +24,13 @@ async def _deliver_pending(limit: int) -> dict[str, Any]:
 @celery_app.task(name="ebms.deliver_pending")
 def deliver_pending(limit: int = 50) -> dict[str, Any]:
     """投递到期未处理的 EBMS Outbox。"""
-    return asyncio.run(_deliver_pending(limit))
+
+    async def _run() -> dict[str, Any]:
+        try:
+            return await _deliver_pending(limit)
+        finally:
+            # 每次 Celery 任务都会新建事件循环；连接池跨循环复用会抛
+            # "Future attached to a different loop"，因此每轮把连接归还。
+            await engine.dispose()
+
+    return asyncio.run(_run())

@@ -32,6 +32,20 @@ Serializer = Callable[[Any], dict[str, Any]]
 KEY_SEP = "#"
 KEY_ESC = "~"
 
+#: 客户等级：EBMS 入站按中文全称校验，CRM 存量存在裸字母脏值（PAND-309 R2）
+_CUSTOMER_LEVEL_ALIASES = {
+    "A": "A级（核心大客户）",
+    "B": "B级（普通大客户）",
+    "C": "C级（中小客户）",
+    "D": "D级（新客/休眠客）",
+}
+
+
+def _customer_level(value: str | None) -> str | None:
+    if not value:
+        return value
+    return _CUSTOMER_LEVEL_ALIASES.get(value.strip(), value)
+
 
 def _ser(value: Any) -> Any:
     """线格式规整：Decimal→float、datetime/date→ISO、UUID→str。"""
@@ -86,7 +100,7 @@ def customer_payload(c: Company) -> dict[str, Any]:
             "customer_code": c.code,
             "former_name": c.former_name,
             "parent_code": c.parent_code,
-            "customer_level": c.customer_level,
+            "customer_level": _customer_level(c.customer_level),
             "sales_mode": c.sales_mode,
             "customer_status": c.customer_status,
             "decision_maker": c.decision_maker,
