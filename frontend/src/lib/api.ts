@@ -140,6 +140,21 @@ export async function uploadFile(
   return json.data;
 }
 
+/** 以 multipart 方式提交任意接口（如产品资料上传，需 50MB 专用校验）。 */
+export async function uploadForm<T>(path: string, form: FormData): Promise<T> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(`${API_BASE_URL}${path}`, {
+    method: 'POST',
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+    body: form,
+  });
+  const json = (await res.json()) as ApiEnvelope<T>;
+  if (!res.ok || json.code !== 0) {
+    throw new ApiError(json.message || '上传失败', json.code, res.status, json.request_id, json.data);
+  }
+  return json.data;
+}
+
 /** 受保护文件的预览地址（附带 token，便于 <img src>）。 */
 export function fileUrl(fileId: string | null | undefined): string {
   if (!fileId) return '';

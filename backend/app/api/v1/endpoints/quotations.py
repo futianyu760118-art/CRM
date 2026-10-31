@@ -27,7 +27,7 @@ from app.schemas.pricing import (
     QuotationUpdate,
 )
 from app.services import approval as approval_service
-from app.services import company_code, email_service, export_excel, storage, system_config
+from app.services import company_code, email_service, export_excel, opportunity_stage, storage, system_config
 from app.services import pdf as pdf_service
 from app.services import pricing as pricing_service
 from app.services.data_scope import apply_data_scope
@@ -406,9 +406,13 @@ async def submit_quotation(
             opp = (
                 await db.execute(select(Opportunity).where(Opportunity.id == quotation.opportunity_id))
             ).scalar_one_or_none()
-            if opp is not None and opp.stage in {"PRICING", "INQUIRY", "REQUIREMENT"}:
-                opp.stage = "QUOTATION"
-                opp.quotation_amount = quotation.total_amount
+            if opp is not None:
+                opportunity_stage.auto_advance(
+                    opp,
+                    "QUOTATION",
+                    from_stages={"PRICING", "INQUIRY", "REQUIREMENT"},
+                    values={"quotation_amount": quotation.total_amount},
+                )
         await db.commit()
         await db.refresh(quotation)
         data = await _serialize(db, quotation)
@@ -434,9 +438,13 @@ async def submit_quotation(
         opp = (
             await db.execute(select(Opportunity).where(Opportunity.id == quotation.opportunity_id))
         ).scalar_one_or_none()
-        if opp is not None and opp.stage in {"PRICING", "INQUIRY", "REQUIREMENT"}:
-            opp.stage = "QUOTATION"
-            opp.quotation_amount = quotation.total_amount
+        if opp is not None:
+            opportunity_stage.auto_advance(
+                opp,
+                "QUOTATION",
+                from_stages={"PRICING", "INQUIRY", "REQUIREMENT"},
+                values={"quotation_amount": quotation.total_amount},
+            )
     await db.commit()
     await db.refresh(quotation)
     data = await _serialize(db, quotation)
@@ -465,6 +473,17 @@ async def approve_quotation(
         quotation.status = "APPROVED"
         quotation.approved_by = current.id
         quotation.approved_at = utcnow()
+        if quotation.opportunity_id:
+            opp = (
+                await db.execute(select(Opportunity).where(Opportunity.id == quotation.opportunity_id))
+            ).scalar_one_or_none()
+            if opp is not None:
+                opportunity_stage.auto_advance(
+                    opp,
+                    "QUOTATION",
+                    from_stages={"PRICING", "INQUIRY", "REQUIREMENT"},
+                    values={"quotation_amount": quotation.total_amount},
+                )
     elif instance.status == "REJECTED":
         quotation.status = "REJECTED"
 

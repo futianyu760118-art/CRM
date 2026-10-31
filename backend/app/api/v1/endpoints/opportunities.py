@@ -10,14 +10,13 @@ from sqlalchemy import or_, select
 
 from app.core import response as resp
 from app.core.deps import DbSession, require_permission
+from app.core.error_codes import ErrCode
 from app.core.exceptions import ApiError, ForbiddenError, NotFoundError
-from app.db.base import utcnow
 from app.domain.state_machine import (
     OPPORTUNITY_STAGES,
     STAGE_LABELS,
     STAGE_RULES,
     allowed_opportunity_transitions,
-    validate_opportunity_transition,
 )
 from app.models.business import Company, Opportunity
 from app.models.user import User
@@ -28,13 +27,12 @@ from app.schemas.business import (
     OpportunityUpdate,
     StageCatalogOut,
 )
+from app.services import opportunity_stage
 from app.services.data_scope import apply_data_scope, get_user_scope
 from app.services.number_sequence import next_number
 from app.services.query import apply_sort, get_or_404, paginate, soft_delete
 
 router = APIRouter(prefix="/opportunities", tags=["M3-商机"])
-
-WON_STAGES = {"WON", "LOST"}
 
 
 async def _to_out(db: DbSession, opp: Opportunity) -> dict[str, Any]:
@@ -56,6 +54,10 @@ async def stage_catalog(_: User = Depends(require_permission("opportunity:view")
                 label=STAGE_LABELS.get(stage, stage),
                 next_stages=allowed_opportunity_transitions(stage),
                 required_fields=rule.required_fields if rule else [],
+                required_field_labels=[
+                    opportunity_stage.required_field_label(stage, name)
+                    for name in (rule.required_fields if rule else [])
+                ],
                 roles=rule.roles if rule else [],
             ).model_dump(mode="json")
         )
@@ -217,6 +219,48 @@ async def delete_opportunity(
     return resp.ok({"deleted": True})
 
 
+@router.get("/{opp_id}/transitions", summary="可流转目标与必填项预检")
+async def list_transitions(
+    opp_id: uuid.UUID,
+    db: DbSession,
+    current: User = Depends(require_permission("opportunity:view")),
+) -> dict[str, Any]:
+    opp = await get_or_404(db, Opportunity, opp_id, "商机")
+    scope_type, dept_ids = await get_user_scope(current, db)
+    if scope_type != "ALL" and opp.owner_id != current.id and opp.department_id not in dept_ids:
+        raise ForbiddenError("无权访问该商机")
+
+    targets = []
+    for stage in allowed_opportunity_transitions(opp.stage):
+        state, _ = await opportunity_stage.evaluate_target(db, opp, stage, {})
+        targets.append(
+            {
+                "stage": state.stage,
+                "label": state.label,
+                "satisfied": state.satisfied,
+                "required": [
+                    {
+                        "field": item.field,
+                        "label": item.label,
+                        "satisfied": item.satisfied,
+                        "source": item.source,
+                    }
+                    for item in state.fields
+                ],
+                "missing_labels": state.missing_labels,
+                "roles": state.role_labels,
+                "role_allowed": opportunity_stage.role_allowed(current, stage),
+            }
+        )
+    return resp.ok(
+        {
+            "current": opp.stage,
+            "current_label": STAGE_LABELS.get(opp.stage, opp.stage),
+            "targets": targets,
+        }
+    )
+
+
 @router.patch("/{opp_id}/stage", summary="变更商机阶段")
 async def change_stage(
     opp_id: uuid.UUID,
@@ -227,56 +271,25 @@ async def change_stage(
     opp = await get_or_404(db, Opportunity, opp_id, "商机")
     target = payload.stage
 
-    rule = STAGE_RULES.get(target)
-    roles = set(current.role_codes)
-    if (
-        not current.is_superuser
-        and rule
-        and roles.isdisjoint(set(rule.roles))
-        and "admin" not in roles
-        and "manager" not in roles
-    ):
-        raise ForbiddenError(f"该阶段仅限角色 {', '.join(rule.roles)} 操作")
+    if target not in STAGE_RULES:
+        raise ApiError(ErrCode.VALIDATION_ERROR, f"未知阶段：{target}", http_status=400)
+    if target not in allowed_opportunity_transitions(opp.stage):
+        raise opportunity_stage.invalid_transition_error(target, opp.stage)
+    if not opportunity_stage.role_allowed(current, target):
+        raise opportunity_stage.role_error(target, opp.stage, current)
 
     context = payload.model_dump(exclude_unset=True)
-    missing = validate_opportunity_transition(opp.stage, target, context)
-    if "__invalid_target__" in missing:
-        raise ApiError(message=f"未知阶段：{target}", http_status=400)
-    if "__invalid_transition__" in missing:
-        allowed = allowed_opportunity_transitions(opp.stage)
-        raise ApiError(
-            message=f"不允许从 {opp.stage} 流转到 {target}；可选：{', '.join(allowed) or '无'}",
-            http_status=400,
-        )
-    if missing:
-        labels = {"name": "名称", "company_id": "客户", "lost_reason": "流失原因"}
-        raise ApiError(
-            message="进入该阶段需先填写：" + "、".join(labels.get(m, m) for m in missing),
-            http_status=400,
-        )
+    state, values = await opportunity_stage.evaluate_target(db, opp, target, context)
+    if not state.satisfied:
+        raise opportunity_stage.missing_error(target, opp.stage, state.missing_labels)
 
-    for field in (
-        "lost_reason",
-        "won_amount",
-        "sample_record",
-        "negotiation_record",
-        "requirement",
-        "estimated_amount",
-        "product_category",
-        "quantity",
-        "inquiry_id",
-        "pricing_id",
-        "quotation_amount",
-    ):
-        if field in context and context[field] is not None:
-            setattr(opp, field, context[field])
-
-    opp.stage = target
-    if target in WON_STAGES:
-        opp.status = "CLOSED"
-    else:
-        opp.status = "OPEN"
-    opp.last_followup_at = utcnow()
+    merged = {
+        name: value
+        for name, value in context.items()
+        if name in opportunity_stage.STAGE_FIELDS and value is not None
+    }
+    merged.update(values)
+    opportunity_stage.apply_transition(opp, target, merged)
     await db.commit()
     await db.refresh(opp)
     return resp.ok(await _to_out(db, opp))

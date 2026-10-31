@@ -52,6 +52,7 @@ api_router.include_router(contacts.router)
 # M3 销售主链路
 api_router.include_router(opportunities.router)
 api_router.include_router(products.router)
+api_router.include_router(products.quotes_router)
 api_router.include_router(inquiries.router)
 api_router.include_router(activities.router)
 api_router.include_router(tasks.router)

@@ -3,6 +3,7 @@
 import { ArrowLeftOutlined, PlusOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  Alert,
   App,
   Button,
   Card,
@@ -11,8 +12,10 @@ import {
   Empty,
   Form,
   Input,
+  InputNumber,
   List,
   Modal,
+  Radio,
   Row,
   Select,
   Space,
@@ -24,7 +27,7 @@ import {
 } from 'antd';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 
 import HasPermission from '@/components/HasPermission';
 import PageHeader from '@/components/common/PageHeader';
@@ -32,7 +35,13 @@ import StatusTag from '@/components/common/StatusTag';
 import { api, buildQuery } from '@/lib/api';
 import { formatDateTime, formatMoney } from '@/lib/format';
 import type { PageResult } from '@/types';
-import type { ActivityItem, Opportunity, StageCatalog, TaskItem } from '@/types/business';
+import type {
+  ActivityItem,
+  Opportunity,
+  OpportunityTransitions,
+  StageCatalog,
+  TaskItem,
+} from '@/types/business';
 
 const STAGE_ORDER = [
   'NEW',
@@ -52,6 +61,7 @@ export default function OpportunityDetailPage() {
   const { message } = App.useApp();
   const queryClient = useQueryClient();
   const [stageOpen, setStageOpen] = useState(false);
+  const [targetStage, setTargetStage] = useState<string | undefined>();
   const [activityOpen, setActivityOpen] = useState(false);
   const [taskOpen, setTaskOpen] = useState(false);
   const [stageForm] = Form.useForm();
@@ -92,10 +102,15 @@ export default function OpportunityDetailPage() {
     enabled: !!id,
   });
 
-  const currentRule = useMemo(
-    () => catalog.data?.find((c) => c.value === opp.data?.stage),
-    [catalog.data, opp.data?.stage],
-  );
+  const transitions = useQuery({
+    queryKey: ['opp-transitions', id],
+    queryFn: () => api.get<OpportunityTransitions>(`/opportunities/${id}/transitions`),
+    enabled: !!id && stageOpen,
+  });
+
+  const targets = transitions.data?.targets ?? [];
+  const activeStage = targetStage ?? targets[0]?.stage;
+  const activeTarget = targets.find((t) => t.stage === activeStage);
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['opportunity', id] });
@@ -105,16 +120,48 @@ export default function OpportunityDetailPage() {
   };
 
   const stageMutation = useMutation({
-    mutationFn: (values: Record<string, unknown>) =>
-      api.patch(`/opportunities/${id}/stage`, { ...values, stage: values.stage }),
+    mutationFn: (values: Record<string, unknown>) => api.patch(`/opportunities/${id}/stage`, values),
     onSuccess: () => {
       message.success('阶段已更新');
       setStageOpen(false);
+      setTargetStage(undefined);
       stageForm.resetFields();
+      queryClient.invalidateQueries({ queryKey: ['opp-transitions', id] });
       invalidate();
     },
     onError: (e: Error) => message.error(e.message),
   });
+
+  const submitStage = async () => {
+    if (!activeStage || !activeTarget) return;
+    const values = (await stageForm.validateFields().catch(() => null)) as Record<string, unknown> | null;
+    if (!values) return;
+    const payload: Record<string, unknown> = { stage: activeStage };
+    activeTarget.required.forEach((item) => {
+      if (values[item.field] !== undefined && values[item.field] !== null) {
+        payload[item.field] = values[item.field];
+      }
+    });
+    stageMutation.mutate(payload);
+  };
+
+  const renderFieldInput = (field: string, label: string) => {
+    switch (field) {
+      case 'requirement':
+      case 'sample_record':
+      case 'negotiation_record':
+      case 'lost_reason':
+        return <Input.TextArea rows={2} placeholder={`请填写${label}`} />;
+      case 'estimated_amount':
+      case 'won_amount':
+      case 'quotation_amount':
+        return <InputNumber min={0.01} precision={2} style={{ width: '100%' }} placeholder={`请填写${label}`} />;
+      case 'quantity':
+        return <InputNumber min={1} precision={0} style={{ width: '100%' }} placeholder={`请填写${label}`} />;
+      default:
+        return <Input placeholder={`请填写${label}`} />;
+    }
+  };
 
   const activityMutation = useMutation({
     mutationFn: (values: Record<string, unknown>) =>
@@ -169,8 +216,9 @@ export default function OpportunityDetailPage() {
               <Button
                 type="primary"
                 onClick={() => {
+                  setTargetStage(undefined);
+                  stageForm.resetFields();
                   setStageOpen(true);
-                  stageForm.setFieldsValue({ stage: currentRule?.next_stages?.[0] });
                 }}
               >
                 阶段流转
@@ -342,87 +390,89 @@ export default function OpportunityDetailPage() {
         title="商机阶段流转"
         open={stageOpen}
         onCancel={() => setStageOpen(false)}
-        onOk={() => stageForm.submit()}
+        onOk={submitStage}
         confirmLoading={stageMutation.isPending}
+        okButtonProps={{ disabled: !activeTarget }}
         destroyOnClose
+        width={640}
       >
         <Typography.Paragraph type="secondary">
-          当前阶段：{currentRule?.label ?? data.stage}
-          {currentRule?.next_stages?.length
-            ? `，可流转至：${currentRule.next_stages.join(' / ')}`
-            : '（终态，不可再流转）'}
+          当前阶段：{transitions.data?.current_label ?? data.stage}
+          。系统已按目标阶段校验必填信息，并自动从来源单据带出可满足项。
         </Typography.Paragraph>
-        <Form form={stageForm} layout="vertical" onFinish={(v) => stageMutation.mutate(v)}>
-          <Form.Item name="stage" label="目标阶段" rules={[{ required: true }]}>
-            <Select
-              options={(currentRule?.next_stages ?? []).map((s) => ({
-                value: s,
-                label: catalog.data?.find((c) => c.value === s)?.label ?? s,
-              }))}
-            />
-          </Form.Item>
-          <Form.Item
-            noStyle
-            shouldUpdate={(prev, cur) => prev.stage !== cur.stage}
-          >
-            {({ getFieldValue }) => {
-              const stage = getFieldValue('stage');
-              if (stage === 'LOST') {
-                return (
-                  <Form.Item name="lost_reason" label="流失原因" rules={[{ required: true }]}>
-                    <Input.TextArea rows={2} placeholder="必填" />
-                  </Form.Item>
-                );
-              }
-              if (stage === 'WON') {
-                return (
-                  <Form.Item name="won_amount" label="成交金额" rules={[{ required: true }]}>
-                    <Input />
-                  </Form.Item>
-                );
-              }
-              if (stage === 'QUALIFIED') {
-                return (
-                  <>
-                    <Form.Item name="requirement" label="需求描述" rules={[{ required: true }]}>
-                      <Input.TextArea rows={2} />
-                    </Form.Item>
-                    <Form.Item name="estimated_amount" label="预计金额" rules={[{ required: true }]}>
-                      <Input />
-                    </Form.Item>
-                  </>
-                );
-              }
-              if (stage === 'REQUIREMENT') {
-                return (
-                  <>
-                    <Form.Item name="product_category" label="产品类别" rules={[{ required: true }]}>
-                      <Input />
-                    </Form.Item>
-                    <Form.Item name="quantity" label="数量" rules={[{ required: true }]}>
-                      <Input />
-                    </Form.Item>
-                  </>
-                );
-              }
-              if (stage === 'SAMPLE') {
-                return (
-                  <Form.Item name="sample_record" label="样品记录" rules={[{ required: true }]}>
-                    <Input.TextArea rows={2} />
-                  </Form.Item>
-                );
-              }
-              if (stage === 'NEGOTIATION') {
-                return (
-                  <Form.Item name="negotiation_record" label="谈判记录" rules={[{ required: true }]}>
-                    <Input.TextArea rows={2} />
-                  </Form.Item>
-                );
-              }
-              return null;
-            }}
-          </Form.Item>
-        </Form>
+        {transitions.isFetching ? <Empty description="加载中..." /> : null}
+        {!transitions.isFetching && targets.length === 0 ? (
+          <Alert type="info" showIcon message="当前为终态，不可再流转" />
+        ) : null}
+        {targets.length > 0 ? (
+          <>
+            <Radio.Group
+              value={activeStage}
+              onChange={(e) => {
+                setTargetStage(e.target.value as string);
+                stageForm.resetFields();
+              }}
+              style={{ marginBottom: 12 }}
+            >
+              <Space wrap>
+                {targets.map((t) => (
+                  <Radio.Button key={t.stage} value={t.stage}>
+                    {t.label}
+                    {t.satisfied ? '（信息齐全）' : ''}
+                  </Radio.Button>
+                ))}
+              </Space>
+            </Radio.Group>
+            {activeTarget ? (
+              <>
+                {!activeTarget.role_allowed ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    message={`该阶段仅限【${activeTarget.roles.join('、')}】操作，可请主管代办`}
+                  />
+                ) : null}
+                <Typography.Text strong>必填信息预检</Typography.Text>
+                <div style={{ margin: '8px 0 12px' }}>
+                  <Space wrap>
+                    {activeTarget.required.length === 0 ? <Tag color="green">无必填项</Tag> : null}
+                    {activeTarget.required.map((r) => (
+                      <Tag key={r.field} color={r.satisfied ? 'green' : 'red'}>
+                        {r.label}：{r.satisfied ? '已满足' : '待填写'}
+                        {r.source ? `（${r.source}）` : ''}
+                      </Tag>
+                    ))}
+                  </Space>
+                </div>
+                <Form form={stageForm} layout="vertical" preserve={false}>
+                  {activeTarget.required
+                    .filter((r) => !r.satisfied)
+                    .map((r) =>
+                      r.field === 'inquiry_id' || r.field === 'pricing_id' ? (
+                        <Alert
+                          key={r.field}
+                          type="warning"
+                          showIcon
+                          style={{ marginBottom: 12 }}
+                          message={`${r.label}：未找到可自动带出的来源单据，请先完成对应询价/核价后再流转`}
+                        />
+                      ) : (
+                        <Form.Item
+                          key={r.field}
+                          name={r.field}
+                          label={r.label}
+                          rules={[{ required: true, message: `请填写${r.label}` }]}
+                        >
+                          {renderFieldInput(r.field, r.label)}
+                        </Form.Item>
+                      ),
+                    )}
+                </Form>
+              </>
+            ) : null}
+          </>
+        ) : null}
       </Modal>
 
       <Modal

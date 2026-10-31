@@ -43,11 +43,20 @@ export interface Sample {
   inquiry_id: string | null;
   product_name: string | null;
   product_code: string | null;
+  product_model: string | null;
   quantity: number;
   sample_type: string;
+  sample_requirement: string | null;
   status: string;
+  plan_date: string | null;
+  overdue_days: number | null;
   send_date: string | null;
   confirm_date: string | null;
+  courier: string | null;
+  tracking_no: string | null;
+  feedback: string | null;
+  feedback_date: string | null;
+  opportunity_id: string | null;
   remark: string | null;
   sync_status: string;
   last_sync_at: string | null;
@@ -58,6 +67,7 @@ export interface Sample {
 
 export interface SampleStats {
   by_status: Record<string, number>;
+  overdue: number;
 }
 
 export interface QuoteLibrary {

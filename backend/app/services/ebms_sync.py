@@ -21,7 +21,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.state_machine import INQUIRY_STATUS_MIGRATION
+from app.domain.state_machine import INQUIRY_STATUS_MIGRATION, SAMPLE_STATUS_WIRE_MAP
 from app.models.business import Company, Inquiry, InquiryItem
 from app.models.sales import Feedback, QuoteLibrary, SalesOrder, Sample
 from app.services import ebms
@@ -232,7 +232,7 @@ def sample_payload(s: Sample) -> dict[str, Any]:
             "product_code": s.product_code,
             "quantity": _dec(s.quantity),
             "sample_type": s.sample_type,
-            "status": s.status,
+            "status": SAMPLE_STATUS_WIRE_MAP.get(s.status, s.status),
             "remarks": s.remark,
             "send_date": _ser(s.send_date),
             "confirm_date": _ser(s.confirm_date),

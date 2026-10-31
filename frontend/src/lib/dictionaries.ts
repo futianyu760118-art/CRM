@@ -72,12 +72,70 @@ export const CUSTOMER_GROUPS: Record<string, string> = {
   dormant: '休眠客户',
 };
 
+// PAND-316：产品资料 / 标准报价 / 样品（与后端字典一致）
+export const PRODUCT_DOC_TYPES: Record<string, string> = {
+  SALES_MATERIAL: '销售资料',
+  SPEC_SHEET: '规格书',
+  TEST_REPORT: '测试报告',
+  CERTIFICATION: '认证文件',
+};
+
+export const CURRENCIES: Record<string, string> = {
+  USD: '美元',
+  CNY: '人民币',
+  EUR: '欧元',
+  JPY: '日元',
+  GBP: '英镑',
+};
+
+export const COURIERS: Record<string, string> = {
+  SF: '顺丰',
+  JD: '京东物流',
+  ZTO: '中通',
+  YTO: '圆通',
+  YUNDA: '韵达',
+  STO: '申通',
+  EMS: 'EMS',
+  DHL: 'DHL',
+  FEDEX: 'FedEx',
+  UPS: 'UPS',
+  OTHER: '其他',
+};
+
+export const SAMPLE_STATUS_LABELS: Record<string, string> = {
+  pending: '待确认',
+  producing: '制作中',
+  testing: '测试中',
+  sent: '已寄出',
+  feedback: '客户反馈',
+};
+
+/** 5 态只能逐级前进：当前状态 → 下一状态 */
+export const SAMPLE_NEXT_STATUS: Record<string, string | undefined> = {
+  pending: 'producing',
+  producing: 'testing',
+  testing: 'sent',
+  sent: 'feedback',
+  feedback: undefined,
+};
+
+export const QUOTE_STATUS_LABELS: Record<string, string> = {
+  ACTIVE: '生效中',
+  EXPIRED: '已过期',
+  PENDING: '未生效',
+  DISABLED: '已停用',
+};
+
 export const LEAD_LEVEL_OPTIONS = toOptions(LEAD_LEVELS);
 export const LEAD_CHANNEL_OPTIONS = toOptions(LEAD_CHANNELS);
 export const CUSTOMER_SOURCE_OPTIONS = toOptions(CUSTOMER_SOURCES);
 export const CUSTOMER_TYPE_OPTIONS = toOptions(CUSTOMER_TYPES);
 export const PAYMENT_METHOD_OPTIONS = toOptions(PAYMENT_METHODS);
 export const CONTACT_RELATION_OPTIONS = toOptions(CONTACT_RELATION_TYPES);
+export const PRODUCT_DOC_TYPE_OPTIONS = toOptions(PRODUCT_DOC_TYPES);
+export const CURRENCY_OPTIONS = toOptions(CURRENCIES);
+export const COURIER_OPTIONS = toOptions(COURIERS);
+export const SAMPLE_STATUS_OPTIONS = toOptions(SAMPLE_STATUS_LABELS);
 
 export function labelOf(dict: Record<string, string>, value?: string | null): string {
   if (!value) return '-';

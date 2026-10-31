@@ -36,7 +36,7 @@ from app.contracts.aeos import (
     validate_contract,
 )
 from app.db.base import utcnow
-from app.domain.state_machine import EXTERNAL_ORDER_STATUS_MAP
+from app.domain.state_machine import EXTERNAL_ORDER_STATUS_MAP, SAMPLE_STATUS_FROM_WIRE
 from app.models.business import Company, Inquiry, InquiryItem
 from app.models.integration import IntegrationLog
 from app.models.sales import Feedback, QuoteLibrary, SalesOrder, Sample, SyncConflict
@@ -271,6 +271,8 @@ def _map_payload(object_type: str, payload: Mapping[str, Any]) -> dict[str, Any]
         value = payload[wire]
         if object_type == "Order" and column == "status":
             value = EXTERNAL_ORDER_STATUS_MAP.get(value, value)
+        elif object_type == "Sample" and column == "status":
+            value = SAMPLE_STATUS_FROM_WIRE.get(value, value)
         out[column] = value
     return out
 

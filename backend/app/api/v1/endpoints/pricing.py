@@ -28,6 +28,7 @@ from app.schemas.pricing import (
     PricingUpdate,
 )
 from app.services import approval as approval_service
+from app.services import opportunity_stage
 from app.services import pricing as pricing_service
 from app.services.data_scope import apply_data_scope
 from app.services.query import apply_sort, get_or_404, paginate
@@ -248,9 +249,13 @@ async def _apply_pricing_approved(db: DbSession, record: PricingRecord, current:
             opp = (
                 await db.execute(select(Opportunity).where(Opportunity.id == inquiry.opportunity_id))
             ).scalar_one_or_none()
-            if opp is not None and opp.stage in {"INQUIRY", "REQUIREMENT"}:
-                opp.stage = "PRICING"
-                opp.pricing_id = record.id
+            if opp is not None:
+                opportunity_stage.auto_advance(
+                    opp,
+                    "PRICING",
+                    from_stages={"INQUIRY", "REQUIREMENT"},
+                    values={"pricing_id": record.id},
+                )
 
 
 @router.post("/{pricing_id}/submit", summary="提交核价审批")

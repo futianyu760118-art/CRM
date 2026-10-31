@@ -75,6 +75,18 @@ class Sample(BusinessModel):
     send_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     confirm_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ---- PAND-316 样品字段补齐（SAMP-01/02/03，可空，存量显示「—」）----
+    product_model: Mapped[str | None] = mapped_column(String(100), nullable=True, comment="产品型号")
+    sample_requirement: Mapped[str | None] = mapped_column(Text, nullable=True, comment="样品要求 ≤2000")
+    plan_date: Mapped[date | None] = mapped_column(Date, nullable=True, comment="计划完成日期")
+    courier: Mapped[str | None] = mapped_column(String(30), nullable=True, comment="快递公司编码")
+    tracking_no: Mapped[str | None] = mapped_column(String(40), nullable=True, comment="快递单号")
+    feedback: Mapped[str | None] = mapped_column(Text, nullable=True, comment="客户反馈 ≤2000")
+    feedback_date: Mapped[date | None] = mapped_column(Date, nullable=True, comment="反馈日期")
+    opportunity_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), nullable=True, index=True, comment="关联商机（SAMP 阶段判定）"
+    )
     sync_status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False, index=True)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

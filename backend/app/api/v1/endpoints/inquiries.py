@@ -23,7 +23,7 @@ from app.schemas.business import (
     InquiryUpdate,
 )
 from app.schemas.pricing import PricingOut
-from app.services import ebms_sync, export_excel
+from app.services import ebms_sync, export_excel, opportunity_stage
 from app.services.data_scope import apply_data_scope, get_user_scope
 from app.services.number_sequence import next_number
 from app.services.query import apply_sort, get_or_404, paginate, soft_delete
@@ -242,9 +242,13 @@ async def submit_inquiry(
         opp = (
             await db.execute(select(Opportunity).where(Opportunity.id == inquiry.opportunity_id))
         ).scalar_one_or_none()
-        if opp is not None and opp.stage in {"REQUIREMENT", "NEW", "QUALIFIED"}:
-            opp.stage = "INQUIRY"
-            opp.inquiry_id = inquiry.id
+        if opp is not None:
+            opportunity_stage.auto_advance(
+                opp,
+                "INQUIRY",
+                from_stages={"REQUIREMENT", "NEW", "QUALIFIED"},
+                values={"inquiry_id": inquiry.id},
+            )
     await ebms_sync.emit_upsert(db, "Inquiry", inquiry)
     await db.commit()
     await db.refresh(inquiry)

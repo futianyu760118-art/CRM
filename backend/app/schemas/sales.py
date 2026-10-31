@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.domain import dictionaries as dic
 from app.schemas.common import ORMModel
 
 
@@ -91,35 +93,126 @@ class SalesOrderOut(ORMModel):
 
 
 # ------------------------------------------------------------------ 样品
+_TRACKING_PATTERN = re.compile(r"^[A-Za-z0-9-]{6,40}$")
+
+
+def _check_quantity(value: float | None) -> float | None:
+    if value is None:
+        return None
+    if value <= 0:
+        raise ValueError("必须大于 0")
+    if abs(value * 100 - round(value * 100)) > 1e-9:
+        raise ValueError("最多 2 位小数")
+    return value
+
+
+def _check_tracking(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if not _TRACKING_PATTERN.fullmatch(value):
+        raise ValueError("应为 6–40 位字母、数字或连字符")
+    return value
+
+
+def _check_courier(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if value not in dic.COURIERS:
+        raise ValueError(f"仅可选 {dic.labels_text(dic.COURIERS)}")
+    return value
+
+
 class SampleCreate(BaseModel):
     sample_no: str | None = None
     customer_name: str = Field(min_length=1, max_length=200)
     inquiry_no: str | None = None
     product_name: str | None = None
     product_code: str | None = None
-    quantity: float = 0
+    product_model: str = Field(min_length=1, max_length=100)
+    quantity: float = Field(default=1, gt=0)
     sample_type: str = "常规"
+    sample_requirement: str | None = Field(default=None, max_length=2000)
+    plan_date: date | None = None
     send_date: date | None = None
     confirm_date: date | None = None
+    courier: str | None = None
+    tracking_no: str | None = Field(default=None, max_length=40)
+    opportunity_id: uuid.UUID | None = None
     remark: str | None = None
     owner_id: uuid.UUID | None = None
+
+    @field_validator("quantity")
+    @classmethod
+    def _quantity(cls, value: float | None) -> float | None:
+        return _check_quantity(value)
+
+    @field_validator("courier")
+    @classmethod
+    def _courier(cls, value: str | None) -> str | None:
+        return _check_courier(value)
+
+    @field_validator("tracking_no")
+    @classmethod
+    def _tracking(cls, value: str | None) -> str | None:
+        return _check_tracking(value)
 
 
 class SampleUpdate(BaseModel):
-    customer_name: str | None = None
+    customer_name: str | None = Field(default=None, max_length=200)
     inquiry_no: str | None = None
     product_name: str | None = None
     product_code: str | None = None
-    quantity: float | None = None
+    product_model: str | None = Field(default=None, min_length=1, max_length=100)
+    quantity: float | None = Field(default=None, gt=0)
     sample_type: str | None = None
+    sample_requirement: str | None = Field(default=None, max_length=2000)
+    plan_date: date | None = None
     send_date: date | None = None
     confirm_date: date | None = None
+    courier: str | None = None
+    tracking_no: str | None = Field(default=None, max_length=40)
+    feedback: str | None = Field(default=None, max_length=2000)
+    feedback_date: date | None = None
+    opportunity_id: uuid.UUID | None = None
     remark: str | None = None
     owner_id: uuid.UUID | None = None
+
+    @field_validator("quantity")
+    @classmethod
+    def _quantity(cls, value: float | None) -> float | None:
+        return _check_quantity(value)
+
+    @field_validator("courier")
+    @classmethod
+    def _courier(cls, value: str | None) -> str | None:
+        return _check_courier(value)
+
+    @field_validator("tracking_no")
+    @classmethod
+    def _tracking(cls, value: str | None) -> str | None:
+        return _check_tracking(value)
 
 
 class SampleStatusIn(BaseModel):
     status: str = Field(min_length=1, max_length=20)
+    courier: str | None = None
+    tracking_no: str | None = Field(default=None, max_length=40)
+    send_date: date | None = None
+    feedback: str | None = Field(default=None, max_length=2000)
+    feedback_date: date | None = None
+
+    @field_validator("courier")
+    @classmethod
+    def _courier(cls, value: str | None) -> str | None:
+        return _check_courier(value)
+
+    @field_validator("tracking_no")
+    @classmethod
+    def _tracking(cls, value: str | None) -> str | None:
+        return _check_tracking(value)
 
 
 class SampleOut(ORMModel):
@@ -132,11 +225,20 @@ class SampleOut(ORMModel):
     inquiry_id: uuid.UUID | None = None
     product_name: str | None = None
     product_code: str | None = None
+    product_model: str | None = None
     quantity: float
     sample_type: str
+    sample_requirement: str | None = None
     status: str
+    plan_date: date | None = None
+    overdue_days: int | None = None
     send_date: date | None = None
     confirm_date: date | None = None
+    courier: str | None = None
+    tracking_no: str | None = None
+    feedback: str | None = None
+    feedback_date: date | None = None
+    opportunity_id: uuid.UUID | None = None
     remark: str | None = None
     sync_status: str
     last_sync_at: datetime | None = None

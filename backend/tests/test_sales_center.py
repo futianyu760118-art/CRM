@@ -32,6 +32,7 @@ from app.domain.state_machine import (
     FEEDBACK_STATUSES,
     SAMPLE_STATUSES,
     allowed_order_transitions,
+    allowed_sample_transitions,
 )
 from app.models.business import Company
 from app.models.integration import IntegrationLog
@@ -319,7 +320,11 @@ class TestOrderStateMachine:
         assert allowed_order_transitions("closed") == []
 
     def test_linear_sample_and_feedback_statuses(self) -> None:
-        assert SAMPLE_STATUSES == ["pending", "confirmed", "producing", "sent", "customer_confirmed", "completed"]
+        # PAND-316 SAMP-02：样品收敛为 5 态，只能逐级前进（无 confirmed/completed）
+        assert SAMPLE_STATUSES == ["pending", "producing", "testing", "sent", "feedback"]
+        assert allowed_sample_transitions("pending") == ["producing"]
+        assert allowed_sample_transitions("sent") == ["feedback"]
+        assert allowed_sample_transitions("feedback") == []
         assert FEEDBACK_STATUSES == ["open", "processing", "resolved", "closed"]
 
 

@@ -474,17 +474,33 @@ class OpportunityUpdate(BaseModel):
 
 class OpportunityStageIn(BaseModel):
     stage: str
-    lost_reason: str | None = None
-    won_amount: float | None = None
-    sample_record: str | None = None
-    negotiation_record: str | None = None
-    requirement: str | None = None
-    estimated_amount: float | None = None
-    product_category: str | None = None
-    quantity: int | None = None
+    lost_reason: str | None = Field(default=None, max_length=500)
+    won_amount: float | None = Field(default=None, gt=0)
+    sample_record: str | None = Field(default=None, max_length=2000)
+    negotiation_record: str | None = Field(default=None, max_length=2000)
+    requirement: str | None = Field(default=None, max_length=2000)
+    estimated_amount: float | None = Field(default=None, gt=0)
+    product_category: str | None = Field(default=None, max_length=100)
+    quantity: int | None = Field(default=None, ge=1)
     inquiry_id: uuid.UUID | None = None
     pricing_id: uuid.UUID | None = None
-    quotation_amount: float | None = None
+    quotation_amount: float | None = Field(default=None, gt=0)
+
+    @field_validator(
+        "lost_reason",
+        "sample_record",
+        "negotiation_record",
+        "requirement",
+        "product_category",
+        mode="before",
+    )
+    @classmethod
+    def _strip_blank(cls, value: str | None) -> str | None:
+        """仅空白字符视为未填写（OPP-02）。"""
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
 
 
 class OpportunityOut(ORMModel):
@@ -509,7 +525,10 @@ class OpportunityOut(ORMModel):
     last_followup_at: datetime | None = None
     lost_reason: str | None = None
     inquiry_id: uuid.UUID | None = None
+    pricing_id: uuid.UUID | None = None
     quotation_amount: float | None = None
+    sample_record: str | None = None
+    negotiation_record: str | None = None
     status: str
     owner_id: uuid.UUID | None = None
     department_id: uuid.UUID | None = None
@@ -521,6 +540,7 @@ class StageCatalogOut(BaseModel):
     label: str
     next_stages: list[str]
     required_fields: list[str]
+    required_field_labels: list[str] = []
     roles: list[str]
 
 
@@ -587,6 +607,75 @@ class SkuUpdate(BaseModel):
     cost: float | None = None
     currency: str | None = None
     status: str | None = None
+
+
+# ------------------------------------------------------------------ 产品资料（PROD）
+class ProductDocumentOut(BaseModel):
+    id: uuid.UUID
+    product_id: uuid.UUID
+    doc_type: str
+    doc_type_label: str
+    version_no: str
+    filename: str
+    size: int
+    is_current: bool
+    file_id: uuid.UUID
+    uploader_name: str | None = None
+    created_at: datetime
+
+
+class ProductDocumentGroupOut(BaseModel):
+    doc_type: str
+    doc_type_label: str
+    count: int
+    latest_version: str | None = None
+    documents: list[ProductDocumentOut] = []
+
+
+class ProductDocumentVersionIn(BaseModel):
+    version_no: str = Field(min_length=1, max_length=20)
+
+
+class StandardQuoteCreate(BaseModel):
+    currency: str = dic.CURRENCY_DEFAULT
+    qty_from: int = Field(ge=1)
+    qty_to: int | None = Field(default=None, ge=2)
+    unit_price: float = Field(gt=0)
+    valid_from: date
+    valid_to: date
+    version_no: str = Field(min_length=1, max_length=20)
+
+    @field_validator("currency")
+    @classmethod
+    def _currency(cls, value: str | None) -> str | None:
+        return _check_enum(value, dic.CURRENCIES)
+
+
+class StandardQuoteOut(BaseModel):
+    id: uuid.UUID
+    product_id: uuid.UUID
+    currency: str
+    currency_label: str
+    qty_from: int
+    qty_to: int | None = None
+    interval_label: str
+    unit_price: float
+    valid_from: date
+    valid_to: date
+    version_no: str
+    status: str
+    status_label: str
+    created_at: datetime
+
+
+class StandardQuoteSelectIn(BaseModel):
+    currency: str = dic.CURRENCY_DEFAULT
+    quantity: int = Field(ge=1)
+
+    @field_validator("currency")
+    @classmethod
+    def _currency(cls, value: str | None) -> str | None:
+        return _check_enum(value, dic.CURRENCIES)
 
 
 # ------------------------------------------------------------------ 询价

@@ -7,6 +7,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -251,6 +252,53 @@ class Sku(BaseModel):
     status: Mapped[str] = mapped_column(String(20), default="ACTIVE", nullable=False)
 
     product: Mapped[Product] = relationship(back_populates="skus", lazy="joined")
+
+
+# ------------------------------------------------------------------ M4 产品资料（PAND-316）
+class ProductDocument(BusinessModel):
+    """产品资料文件（4 类文件型资料，PROD-01/02）。
+
+    标准报价独立在 ``standard_quote``；本表只承载可下载文件。
+    ``is_current`` 由服务层按同产品同类型版本号重算（PROD-02）。
+    """
+
+    __tablename__ = "product_document"
+    __table_args__ = (
+        UniqueConstraint("product_id", "doc_type", "version_no", name="uq_product_document_version"),
+    )
+
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("product.id"), nullable=False, index=True
+    )
+    doc_type: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    version_no: Mapped[str] = mapped_column(String(20), nullable=False)
+    file_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("file.id"), nullable=False, index=True
+    )
+    filename: Mapped[str] = mapped_column(String(300), nullable=False)
+    size: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class StandardQuote(BusinessModel):
+    """标准报价（PROD-03）：同产品同币种按数量区间定价，区间不重叠。"""
+
+    __tablename__ = "standard_quote"
+    __table_args__ = (
+        UniqueConstraint("product_id", "currency", "version_no", name="uq_standard_quote_version"),
+    )
+
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("product.id"), nullable=False, index=True
+    )
+    currency: Mapped[str] = mapped_column(String(10), default="USD", nullable=False)
+    qty_from: Mapped[int] = mapped_column(Integer, nullable=False)
+    qty_to: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unit_price: Mapped[float] = mapped_column(MONEY, nullable=False)
+    valid_from: Mapped[date] = mapped_column(Date, nullable=False)
+    valid_to: Mapped[date] = mapped_column(Date, nullable=False)
+    version_no: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="ACTIVE", nullable=False, index=True)
 
 
 # ------------------------------------------------------------------ M3 询价

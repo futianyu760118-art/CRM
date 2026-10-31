@@ -213,6 +213,9 @@ export interface Opportunity {
   last_followup_at: string | null;
   lost_reason: string | null;
   inquiry_id: string | null;
+  pricing_id: string | null;
+  sample_record: string | null;
+  negotiation_record: string | null;
   quotation_amount: number | null;
   status: string;
   owner_id: string | null;
@@ -224,7 +227,68 @@ export interface StageCatalog {
   label: string;
   next_stages: string[];
   required_fields: string[];
+  required_field_labels: string[];
   roles: string[];
+}
+
+export interface TransitionTarget {
+  stage: string;
+  label: string;
+  satisfied: boolean;
+  required: {
+    field: string;
+    label: string;
+    satisfied: boolean;
+    source: string | null;
+  }[];
+  missing_labels: string[];
+  roles: string[];
+  role_allowed: boolean;
+}
+
+export interface OpportunityTransitions {
+  current: string;
+  current_label: string;
+  targets: TransitionTarget[];
+}
+
+export interface ProductDocument {
+  id: string;
+  product_id: string;
+  doc_type: string;
+  doc_type_label: string;
+  version_no: string;
+  filename: string;
+  size: number;
+  is_current: boolean;
+  file_id: string;
+  uploader_name: string | null;
+  created_at: string;
+}
+
+export interface ProductDocumentGroup {
+  doc_type: string;
+  doc_type_label: string;
+  count: number;
+  latest_version: string | null;
+  documents: ProductDocument[];
+}
+
+export interface StandardQuote {
+  id: string;
+  product_id: string;
+  currency: string;
+  currency_label: string;
+  qty_from: number;
+  qty_to: number | null;
+  interval_label: string;
+  unit_price: number;
+  valid_from: string;
+  valid_to: string;
+  version_no: string;
+  status: string;
+  status_label: string;
+  created_at: string;
 }
 
 export interface KanbanColumn {

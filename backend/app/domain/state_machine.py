@@ -231,8 +231,47 @@ ORDER_RISK_FILTER: list[str] = ["blue", "yellow", "red"]
 # 外部状态 -> 本地状态映射（AC-M4.4；16-09=B：同名映射 completed→completed、closed→closed）
 EXTERNAL_ORDER_STATUS_MAP: dict[str, str] = {"completed": "completed", "closed": "closed"}
 
-# 样品（AC-M5.3）
-SAMPLE_STATUSES: list[str] = ["pending", "confirmed", "producing", "sent", "customer_confirmed", "completed"]
+# 样品（PAND-316 SAMP-02：5 态，替换原 6 态）
+SAMPLE_STATUSES: list[str] = ["pending", "producing", "testing", "sent", "feedback"]
+SAMPLE_STATUS_LABELS: dict[str, str] = {
+    "pending": "待确认",
+    "producing": "制作中",
+    "testing": "测试中",
+    "sent": "已寄出",
+    "feedback": "客户反馈",
+}
+SAMPLE_TERMINAL_STATUS = "feedback"
+
+# 旧 6 态 -> 新 5 态（迁移与 EBMS 入站共用）
+SAMPLE_STATUS_MIGRATION: dict[str, str] = {
+    "pending": "pending",
+    "confirmed": "producing",
+    "producing": "producing",
+    "sent": "sent",
+    "customer_confirmed": "feedback",
+    "completed": "feedback",
+}
+
+# 新 5 态 -> EBMS 线径旧值（PAND-314 R1：不破坏既有同步契约）
+SAMPLE_STATUS_WIRE_MAP: dict[str, str] = {
+    "pending": "pending",
+    "producing": "producing",
+    "testing": "producing",
+    "sent": "sent",
+    "feedback": "customer_confirmed",
+}
+SAMPLE_STATUS_FROM_WIRE: dict[str, str] = {
+    wire: status for status, wire in SAMPLE_STATUS_WIRE_MAP.items()
+}
+SAMPLE_STATUS_FROM_WIRE.update({"confirmed": "producing", "completed": "feedback"})
+
+# 商机阶段角色中文名（OPP-03 提示不得出现英文枚举）
+STAGE_ROLE_LABELS: dict[str, str] = {
+    "sales": "销售",
+    "pricing": "核价员",
+    "manager": "销售主管",
+    "admin": "管理员",
+}
 
 # 问题反馈（AC-M6.1 / AC-M6.3）
 FEEDBACK_TYPES: list[str] = ["bug", "feature", "improvement", "question"]
@@ -251,3 +290,18 @@ def allowed_order_transitions(current: str) -> list[str]:
     idx = ORDER_PROGRESSION.index(current)
     nxt = [ORDER_PROGRESSION[idx + 1]] if idx + 1 < len(ORDER_PROGRESSION) else []
     return nxt + ["closed", "cancelled"]
+
+
+def allowed_sample_transitions(current: str) -> list[str]:
+    """样品 5 态链：只允许前进一态，终态无后续（SAMP-02）。"""
+    if current in {SAMPLE_TERMINAL_STATUS} or current not in SAMPLE_STATUSES:
+        return []
+    idx = SAMPLE_STATUSES.index(current)
+    return [SAMPLE_STATUSES[idx + 1]] if idx + 1 < len(SAMPLE_STATUSES) else []
+
+
+def opportunity_stage_index(stage: str) -> int:
+    """阶段序号（LOST 不在正向链内，按终态处理）。"""
+    if stage in _STAGE_ORDER:
+        return _STAGE_ORDER.index(stage)
+    return len(_STAGE_ORDER)
