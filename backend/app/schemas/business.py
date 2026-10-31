@@ -2,13 +2,25 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import date, datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from app.domain import dictionaries as dic
 from app.schemas.common import ORMModel
+
+_WHATSAPP_PATTERN = re.compile(r"^[+0-9\s-]*$")
+
+
+def _check_enum(value: str | None, options: dict[str, str]) -> str | None:
+    if value is None:
+        return None
+    if value not in options:
+        raise ValueError(f"仅可选 {dic.labels_text(options)}")
+    return value
 
 
 # ------------------------------------------------------------------ 线索
@@ -20,8 +32,24 @@ class LeadCreate(BaseModel):
     country: str | None = None
     industry: str | None = None
     source: str = "EXHIBITION"
+    requirement_text: str | None = Field(default=None, max_length=5000)
+    lead_level: str = dic.LEAD_LEVEL_DEFAULT
+    background: str | None = Field(default=None, max_length=5000)
+    channel: str = dic.LEAD_CHANNEL_DEFAULT
     owner_id: uuid.UUID | None = None
     remark: str | None = None
+    force: bool = False
+    dedup_note: str | None = Field(default=None, max_length=200)
+
+    @field_validator("lead_level")
+    @classmethod
+    def _lead_level(cls, value: str | None) -> str | None:
+        return _check_enum(value, dic.LEAD_LEVELS)
+
+    @field_validator("channel")
+    @classmethod
+    def _channel(cls, value: str | None) -> str | None:
+        return _check_enum(value, dic.LEAD_CHANNELS)
 
 
 class LeadUpdate(BaseModel):
@@ -33,8 +61,24 @@ class LeadUpdate(BaseModel):
     industry: str | None = None
     source: str | None = None
     status: str | None = None
+    requirement_text: str | None = Field(default=None, max_length=5000)
+    lead_level: str | None = None
+    background: str | None = Field(default=None, max_length=5000)
+    channel: str | None = None
     owner_id: uuid.UUID | None = None
     remark: str | None = None
+    force: bool = False
+    dedup_note: str | None = Field(default=None, max_length=200)
+
+    @field_validator("lead_level")
+    @classmethod
+    def _lead_level(cls, value: str | None) -> str | None:
+        return _check_enum(value, dic.LEAD_LEVELS)
+
+    @field_validator("channel")
+    @classmethod
+    def _channel(cls, value: str | None) -> str | None:
+        return _check_enum(value, dic.LEAD_CHANNELS)
 
 
 class LeadOut(ORMModel):
@@ -47,12 +91,21 @@ class LeadOut(ORMModel):
     country: str | None = None
     industry: str | None = None
     source: str
+    requirement_text: str | None = None
+    lead_level: str | None = None
+    background: str | None = None
+    channel: str | None = None
     status: str
     owner_id: uuid.UUID | None = None
+    owner_name: str | None = None
     department_id: uuid.UUID | None = None
     assigned_at: datetime | None = None
     converted_company_id: uuid.UUID | None = None
+    converted_company_name: str | None = None
+    converted_company_code: str | None = None
     converted_at: datetime | None = None
+    last_followup_at: datetime | None = None
+    next_due_date: datetime | None = None
     remark: str | None = None
     created_at: datetime
 
@@ -61,9 +114,24 @@ class LeadAssignIn(BaseModel):
     owner_id: uuid.UUID
 
 
+class LeadDuplicateCheckIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    email: str | None = None
+    phone: str | None = None
+    exclude_lead_id: uuid.UUID | None = None
+
+
 class LeadConvertIn(BaseModel):
     customer_level: str | None = None
     create_contact: bool = True
+    link_company_id: uuid.UUID | None = None
+    non_duplicate_reason: str | None = Field(default=None, min_length=1, max_length=200)
+    relation_type: str = dic.CONTACT_RELATION_DEFAULT
+
+    @field_validator("relation_type")
+    @classmethod
+    def _relation_type(cls, value: str | None) -> str | None:
+        return _check_enum(value, dic.CONTACT_RELATION_TYPES)
 
 
 class LeadConvertOut(BaseModel):
@@ -71,9 +139,18 @@ class LeadConvertOut(BaseModel):
     company_id: uuid.UUID
     company_code: str
     contact_id: uuid.UUID | None = None
+    linked_existing: bool = False
 
 
 # ------------------------------------------------------------------ 客户
+def _check_website(value: str | None) -> str | None:
+    if value is None or value == "":
+        return value
+    if not value.startswith(("http://", "https://")):
+        raise ValueError("请输入以 http:// 或 https:// 开头的网址")
+    return value
+
+
 class CompanyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     name_en: str | None = None
@@ -81,12 +158,38 @@ class CompanyCreate(BaseModel):
     currency: str = "USD"
     industry: str | None = None
     customer_level: str | None = None
-    source: str | None = None
+    source: str | None = dic.CUSTOMER_SOURCE_DEFAULT
+    customer_type: str | None = dic.CUSTOMER_TYPE_DEFAULT
     status: str = "ACTIVE"
-    website: str | None = None
-    address: str | None = None
+    website: str | None = Field(default=None, max_length=200)
+    address: str | None = Field(default=None, max_length=500)
+    company_background: str | None = Field(default=None, max_length=5000)
+    main_products: str | None = Field(default=None, max_length=500)
+    brand: str | None = Field(default=None, max_length=300)
+    sales_channel_market: str | None = Field(default=None, max_length=1000)
+    payment_method: str | None = None
     remark: str | None = None
     owner_id: uuid.UUID | None = None
+
+    @field_validator("source")
+    @classmethod
+    def _source(cls, value: str | None) -> str | None:
+        return _check_enum(value, dic.CUSTOMER_SOURCES)
+
+    @field_validator("customer_type")
+    @classmethod
+    def _customer_type(cls, value: str | None) -> str | None:
+        return _check_enum(value, dic.CUSTOMER_TYPES)
+
+    @field_validator("payment_method")
+    @classmethod
+    def _payment_method(cls, value: str | None) -> str | None:
+        return _check_enum(value, dic.PAYMENT_METHODS)
+
+    @field_validator("website")
+    @classmethod
+    def _website(cls, value: str | None) -> str | None:
+        return _check_website(value)
 
 
 class CompanyUpdate(BaseModel):
@@ -97,11 +200,42 @@ class CompanyUpdate(BaseModel):
     industry: str | None = None
     customer_level: str | None = None
     source: str | None = None
+    customer_type: str | None = None
     status: str | None = None
-    website: str | None = None
-    address: str | None = None
+    website: str | None = Field(default=None, max_length=200)
+    address: str | None = Field(default=None, max_length=500)
+    company_background: str | None = Field(default=None, max_length=5000)
+    main_products: str | None = Field(default=None, max_length=500)
+    brand: str | None = Field(default=None, max_length=300)
+    sales_channel_market: str | None = Field(default=None, max_length=1000)
+    payment_method: str | None = None
     remark: str | None = None
     owner_id: uuid.UUID | None = None
+
+    @field_validator("source")
+    @classmethod
+    def _source(cls, value: str | None) -> str | None:
+        return _check_enum(value, dic.CUSTOMER_SOURCES)
+
+    @field_validator("customer_type")
+    @classmethod
+    def _customer_type(cls, value: str | None) -> str | None:
+        return _check_enum(value, dic.CUSTOMER_TYPES)
+
+    @field_validator("payment_method")
+    @classmethod
+    def _payment_method(cls, value: str | None) -> str | None:
+        return _check_enum(value, dic.PAYMENT_METHODS)
+
+    @field_validator("website")
+    @classmethod
+    def _website(cls, value: str | None) -> str | None:
+        return _check_website(value)
+
+
+class PrimaryContactOut(BaseModel):
+    name: str
+    contact_value: str | None = None
 
 
 class CompanyOut(ORMModel):
@@ -114,9 +248,15 @@ class CompanyOut(ORMModel):
     industry: str | None = None
     customer_level: str | None = None
     source: str | None = None
+    customer_type: str | None = None
     status: str
     website: str | None = None
     address: str | None = None
+    company_background: str | None = None
+    main_products: str | None = None
+    brand: str | None = None
+    sales_channel_market: str | None = None
+    payment_method: str | None = None
     remark: str | None = None
     external_id: str | None = None
     sync_status: str | None = None
@@ -126,7 +266,17 @@ class CompanyOut(ORMModel):
     owner_seq: int | None = None
     global_seq: int | None = None
     code_rule: str | None = None
+    customer_group: str | None = None
+    group_reason: str | None = None
+    primary_contact: PrimaryContactOut | None = None
     created_at: datetime
+
+
+class CustomerGroupSummary(BaseModel):
+    all: int = 0
+    new: int = 0
+    active: int = 0
+    dormant: int = 0
 
 
 class BusinessCodeOut(ORMModel):
@@ -183,28 +333,71 @@ class DuplicateGroup(BaseModel):
 
 
 # ------------------------------------------------------------------ 联系人
+def _check_whatsapp(value: str | None) -> str | None:
+    if value is None or value == "":
+        return value
+    if not _WHATSAPP_PATTERN.match(value):
+        raise ValueError("仅可包含数字、空格、+ 和 -")
+    return value
+
+
 class ContactCreate(BaseModel):
     company_id: uuid.UUID | None = None
     name: str = Field(min_length=1, max_length=100)
-    position: str | None = None
+    position: str | None = Field(default=None, max_length=100)
     email: str | None = None
     phone: str | None = None
     mobile: str | None = None
-    wechat: str | None = None
+    wechat: str | None = Field(default=None, max_length=100)
+    whatsapp: str | None = Field(default=None, max_length=100)
+    relation_type: str | None = dic.CONTACT_RELATION_DEFAULT
     is_primary: bool = False
     remark: str | None = None
+    link_to_existing_id: uuid.UUID | None = None
+    force_independent: bool = False
+
+    @field_validator("whatsapp")
+    @classmethod
+    def _whatsapp(cls, value: str | None) -> str | None:
+        return _check_whatsapp(value)
+
+    @field_validator("relation_type")
+    @classmethod
+    def _relation_type(cls, value: str | None) -> str | None:
+        return _check_enum(value, dic.CONTACT_RELATION_TYPES)
 
 
 class ContactUpdate(BaseModel):
     company_id: uuid.UUID | None = None
     name: str | None = None
-    position: str | None = None
+    position: str | None = Field(default=None, max_length=100)
     email: str | None = None
     phone: str | None = None
     mobile: str | None = None
-    wechat: str | None = None
+    wechat: str | None = Field(default=None, max_length=100)
+    whatsapp: str | None = Field(default=None, max_length=100)
+    relation_type: str | None = None
     is_primary: bool | None = None
     remark: str | None = None
+
+    @field_validator("whatsapp")
+    @classmethod
+    def _whatsapp(cls, value: str | None) -> str | None:
+        return _check_whatsapp(value)
+
+    @field_validator("relation_type")
+    @classmethod
+    def _relation_type(cls, value: str | None) -> str | None:
+        return _check_enum(value, dic.CONTACT_RELATION_TYPES)
+
+
+class ContactCompanyOut(BaseModel):
+    company_id: uuid.UUID
+    company_code: str | None = None
+    company_name: str
+    relation_type: str
+    relation_label: str
+    is_primary: bool
 
 
 class ContactOut(ORMModel):
@@ -217,10 +410,29 @@ class ContactOut(ORMModel):
     phone: str | None = None
     mobile: str | None = None
     wechat: str | None = None
+    whatsapp: str | None = None
+    relation_type: str | None = None
+    relation_label: str | None = None
     is_primary: bool
     remark: str | None = None
     owner_id: uuid.UUID | None = None
+    companies: list[ContactCompanyOut] = Field(default_factory=list)
     created_at: datetime
+
+
+class ContactLinkIn(BaseModel):
+    company_id: uuid.UUID
+    relation_type: str = dic.CONTACT_RELATION_DEFAULT
+    is_primary: bool = False
+
+    @field_validator("relation_type")
+    @classmethod
+    def _relation_type(cls, value: str) -> str:
+        return _check_enum(value, dic.CONTACT_RELATION_TYPES) or dic.CONTACT_RELATION_DEFAULT
+
+
+class ContactPrimaryIn(BaseModel):
+    company_id: uuid.UUID | None = None
 
 
 # ------------------------------------------------------------------ 商机

@@ -8,13 +8,52 @@ export interface Lead {
   country: string | null;
   industry: string | null;
   source: string;
+  requirement_text: string | null;
+  lead_level: string | null;
+  background: string | null;
+  channel: string | null;
   status: string;
   owner_id: string | null;
+  owner_name?: string | null;
   assigned_at: string | null;
   converted_company_id: string | null;
+  converted_company_name?: string | null;
+  converted_company_code?: string | null;
   converted_at: string | null;
+  last_followup_at?: string | null;
+  next_due_date?: string | null;
   remark: string | null;
   created_at: string;
+}
+
+export interface DuplicateCandidate {
+  ref: string;
+  kind: 'lead' | 'customer' | 'contact';
+  id: string;
+  name: string | null;
+  owner_name: string | null;
+  email: string | null;
+  phone: string | null;
+  reason: string | null;
+  company_id: string | null;
+  company_name: string | null;
+  last_followup_at: string | null;
+}
+
+export interface DuplicateResult {
+  definite: DuplicateCandidate[];
+  suspected: DuplicateCandidate[];
+  truncated: boolean;
+  total: number;
+}
+
+export interface DuplicateConflictData extends DuplicateResult {
+  candidates: DuplicateCandidate[];
+}
+
+export interface PrimaryContact {
+  name: string;
+  contact_value: string | null;
 }
 
 export interface Company {
@@ -27,9 +66,15 @@ export interface Company {
   industry: string | null;
   customer_level: string | null;
   source: string | null;
+  customer_type: string | null;
   status: string;
   website: string | null;
   address: string | null;
+  company_background: string | null;
+  main_products: string | null;
+  brand: string | null;
+  sales_channel_market: string | null;
+  payment_method: string | null;
   remark: string | null;
   external_id: string | null;
   sync_status: string | null;
@@ -38,8 +83,18 @@ export interface Company {
   owner_seq: number | null;
   global_seq: number | null;
   code_rule?: string | null;
+  customer_group?: string | null;
+  group_reason?: string | null;
+  primary_contact?: PrimaryContact | null;
   created_at: string;
   contact_count?: number;
+}
+
+export interface CustomerGroupSummary {
+  all: number;
+  new: number;
+  active: number;
+  dormant: number;
 }
 
 export interface BusinessCodeItem {
@@ -65,17 +120,35 @@ export interface CustomerCodePreview {
   rule: string;
 }
 
+export interface CompanyContact {
+  id: string;
+  link_id: string;
+  name: string;
+  position: string | null;
+  email: string | null;
+  phone: string | null;
+  mobile: string | null;
+  wechat: string | null;
+  whatsapp: string | null;
+  relation_type: string;
+  relation_label: string;
+  is_primary: boolean;
+  contact_value: string | null;
+  created_at: string | null;
+}
+
+export interface ContactCompanyRelation {
+  company_id: string;
+  company_code: string | null;
+  company_name: string;
+  relation_type: string;
+  relation_label: string;
+  is_primary: boolean;
+}
+
 export interface CompanyDetail extends Company {
   business_codes: BusinessCodeItem[];
-  contacts: {
-    id: string;
-    name: string;
-    position: string | null;
-    email: string | null;
-    phone: string | null;
-    mobile: string | null;
-    is_primary: boolean;
-  }[];
+  contacts: CompanyContact[];
   opportunities: {
     id: string;
     opportunity_no: string;
@@ -109,7 +182,11 @@ export interface Contact {
   phone: string | null;
   mobile: string | null;
   wechat: string | null;
+  whatsapp: string | null;
+  relation_type: string | null;
+  relation_label: string | null;
   is_primary: boolean;
+  companies: ContactCompanyRelation[];
   remark: string | null;
   created_at: string;
 }

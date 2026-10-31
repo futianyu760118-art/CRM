@@ -15,13 +15,15 @@ export class ApiError extends Error {
   code: number;
   status: number;
   requestId: string;
+  data: unknown;
 
-  constructor(message: string, code: number, status: number, requestId = '') {
+  constructor(message: string, code: number, status: number, requestId = '', data?: unknown) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
     this.status = status;
     this.requestId = requestId;
+    this.data = data;
   }
 }
 
@@ -90,7 +92,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 
   const json = await parse<T>(res);
   if (!res.ok || json.code !== 0) {
-    throw new ApiError(json.message || '请求失败', json.code, res.status, json.request_id);
+    throw new ApiError(json.message || '请求失败', json.code, res.status, json.request_id, json.data);
   }
   return json.data;
 }

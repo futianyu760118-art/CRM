@@ -6,7 +6,19 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -37,6 +49,12 @@ class Lead(BusinessModel):
     converted_contact_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True), nullable=True)
     converted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ---- PAND-312 线索扩字段（LEAD-01，可空，存量不回填）----
+    requirement_text: Mapped[str | None] = mapped_column(Text, nullable=True, comment="具体需求内容 ≤5000")
+    lead_level: Mapped[str | None] = mapped_column(String(10), nullable=True, comment="A/B/C")
+    background: Mapped[str | None] = mapped_column(Text, nullable=True, comment="初步背景调查 ≤5000")
+    channel: Mapped[str | None] = mapped_column(String(30), nullable=True, comment="客户渠道分类编码")
 
 
 # ------------------------------------------------------------------ M2 客户
@@ -79,6 +97,16 @@ class Company(BusinessModel):
     bank_account: Mapped[str | None] = mapped_column(String(100), nullable=True)
     country_region: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
+    # ---- PAND-312 客户档案扩字段（CUST-01，可空，存量不回填）----
+    customer_type: Mapped[str | None] = mapped_column(String(30), nullable=True, comment="客户类型编码")
+    company_background: Mapped[str | None] = mapped_column(Text, nullable=True, comment="公司背景 ≤5000")
+    main_products: Mapped[str | None] = mapped_column(String(500), nullable=True, comment="主营产品")
+    brand: Mapped[str | None] = mapped_column(String(300), nullable=True, comment="品牌")
+    sales_channel_market: Mapped[str | None] = mapped_column(
+        String(1000), nullable=True, comment="销售渠道及市场"
+    )
+    payment_method: Mapped[str | None] = mapped_column(String(20), nullable=True, comment="付款方式编码")
+
     contacts: Mapped[list[Contact]] = relationship(
         back_populates="company", lazy="noload", cascade="all, delete-orphan"
     )
@@ -108,6 +136,36 @@ class Contact(BusinessModel):
     kind: Mapped[str | None] = mapped_column(String(20), nullable=True, comment="decision 决策人 / contact 对接人")
 
     company: Mapped[Company | None] = relationship(back_populates="contacts", lazy="joined")
+
+
+class ContactCompanyLink(BusinessModel):
+    """联系人-客户关联（一人多客户，CONT-04）。
+
+    主档字段（姓名/手机/邮箱/微信/WhatsApp/职位）只在 ``contact`` 一条记录上，
+    本表承载「关系类型 + 主要联系人标记」。``contact.company_id/is_primary``
+    保留为「主公司 + 主标记」冗余列，由服务层统一回写（PAND-314 §2.3）。
+    """
+
+    __tablename__ = "contact_company_link"
+
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("contact.id"), nullable=False, index=True
+    )
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("company.id"), nullable=False, index=True
+    )
+    relation_type: Mapped[str] = mapped_column(String(30), default="OTHER", nullable=False)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("contact_id", "company_id", name="uq_contact_company_link"),
+        Index(
+            "uq_link_primary",
+            "company_id",
+            unique=True,
+            postgresql_where=text("is_primary AND deleted_at IS NULL"),
+        ),
+    )
 
 
 class BusinessCode(BaseModel):

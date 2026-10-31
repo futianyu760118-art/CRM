@@ -8,17 +8,19 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from openpyxl import load_workbook
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import or_, select, update
 
 from app.core import response as resp
 from app.core.deps import DbSession, require_permission
 from app.core.error_codes import ErrCode
 from app.core.exceptions import ApiError, ConflictError, ForbiddenError
+from app.db.base import utcnow
 from app.models.business import (
     Activity,
     BusinessCode,
     Company,
     Contact,
+    ContactCompanyLink,
     Inquiry,
     Opportunity,
 )
@@ -37,8 +39,9 @@ from app.schemas.business import (
     CurrencyCodeIn,
     CurrencyCodeOut,
     CustomerCodePreview,
+    CustomerGroupSummary,
 )
-from app.services import company_code, ebms_sync
+from app.services import company_code, contact_link, customer_group, ebms_sync
 from app.services.data_scope import apply_data_scope, can_access_owner, get_user_scope
 from app.services.query import apply_sort, get_or_404, paginate, soft_delete
 
@@ -88,18 +91,13 @@ async def _company_or_404(db: DbSession, company_id: uuid.UUID) -> Company:
 
 
 async def _enrich(db: DbSession, rows: list[Company]) -> list[dict[str, Any]]:
-    """补全负责人名称、联系人数量、编码规则提示。"""
-    ids = [r.id for r in rows]
-    counts: dict[uuid.UUID, int] = {}
-    if ids:
-        found = (
-            await db.execute(
-                select(Contact.company_id, func.count())
-                .where(Contact.company_id.in_(ids), Contact.deleted_at.is_(None))
-                .group_by(Contact.company_id)
-            )
-        ).all()
-        counts = {r[0]: int(r[1]) for r in found}
+    """补全负责人、联系人数量/主要联系人、客户分组与编码规则提示。"""
+    ids = {r.id for r in rows}
+    counts = await contact_link.company_contact_counts(db, ids)
+    primaries = await contact_link.primary_contact_map(db, ids)
+    now = utcnow()
+    followups = await customer_group.last_followup_map(db, ids)
+    closed_orders = await customer_group.closed_order_company_ids(db, ids)
 
     owner_ids = {r.owner_id for r in rows if r.owner_id}
     owners: dict[uuid.UUID, str] = {}
@@ -113,6 +111,16 @@ async def _enrich(db: DbSession, rows: list[Company]) -> list[dict[str, Any]]:
         data["contact_count"] = counts.get(row.id, 0)
         data["owner_name"] = owners.get(row.owner_id) if row.owner_id else None
         data["code_rule"] = CODE_RULE
+        group, reason = customer_group.classify(
+            row.created_at,
+            row.customer_status,
+            followups.get(row.id),
+            row.id in closed_orders,
+            now,
+        )
+        data["customer_group"] = group
+        data["group_reason"] = reason
+        data["primary_contact"] = primaries.get(row.id)
         result.append(data)
     return result
 
@@ -125,6 +133,10 @@ async def list_companies(
     country: str | None = None,
     customer_level: str | None = None,
     status: str | None = None,
+    source: str | None = None,
+    customer_type: str | None = None,
+    payment_method: str | None = None,
+    group: str | None = Query(None, pattern="^(all|new|active|dormant)$", description="新/活跃/休眠分组"),
     owner_id: uuid.UUID | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
@@ -148,6 +160,15 @@ async def list_companies(
         stmt = stmt.where(Company.customer_level == customer_level)
     if status:
         stmt = stmt.where(Company.status == status)
+    if source:
+        stmt = stmt.where(Company.source == source)
+    if customer_type:
+        stmt = stmt.where(Company.customer_type == customer_type)
+    if payment_method:
+        stmt = stmt.where(Company.payment_method == payment_method)
+    condition = customer_group.group_condition(group, Company, utcnow())
+    if condition is not None:
+        stmt = stmt.where(condition)
     if owner_id:
         stmt = stmt.where(Company.owner_id == owner_id)
     stmt = await apply_data_scope(stmt, Company, current, db)
@@ -156,6 +177,17 @@ async def list_companies(
     rows, total = await paginate(db, stmt, page, page_size)
     items = await _enrich(db, list(rows))
     return resp.page(items, total, page, page_size)
+
+
+@router.get("/groups/summary", summary="客户分组计数（新/活跃/休眠）")
+async def group_summary(
+    db: DbSession,
+    current: User = Depends(require_permission("customer:view")),
+) -> dict[str, Any]:
+    scoped = select(Company.id).where(Company.deleted_at.is_(None))
+    scoped = await apply_data_scope(scoped, Company, current, db)
+    counts = await customer_group.summary_counts(db, scoped, utcnow())
+    return resp.ok(CustomerGroupSummary(**counts).model_dump(mode="json"))
 
 
 @router.post("", summary="新建客户", status_code=201)
@@ -168,12 +200,13 @@ async def create_company(
     owner = (await db.execute(select(User).where(User.id == owner_id))).scalar_one_or_none() or current
 
     code, owner_seq, global_seq = await company_code.next_company_code(owner)
+    data = payload.model_dump(exclude_unset=True)
+    data["owner_id"] = owner.id
     company = Company(
-        **payload.model_dump(exclude_unset=True),
+        **data,
         code=code,
         owner_seq=owner_seq,
         global_seq=global_seq,
-        owner_id=owner.id,
         department_id=current.department_id,
     )
     db.add(company)
@@ -295,6 +328,42 @@ async def duplicates(
     return resp.ok(result)
 
 
+async def _merge_contact_links(db: DbSession, source_id: uuid.UUID, target_id: uuid.UUID) -> None:
+    """合并客户时迁移联系人关联，避免与目标客户已有 link 冲突。"""
+    source_links = (
+        await db.execute(
+            select(ContactCompanyLink).where(
+                ContactCompanyLink.company_id == source_id,
+                ContactCompanyLink.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    if not source_links:
+        return
+    target_links = {
+        link.contact_id: link
+        for link in (
+            await db.execute(
+                select(ContactCompanyLink).where(
+                    ContactCompanyLink.company_id == target_id,
+                    ContactCompanyLink.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+    }
+    has_primary = any(link.is_primary for link in target_links.values())
+    for link in source_links:
+        existing = target_links.get(link.contact_id)
+        if existing is not None:
+            link.deleted_at = utcnow()
+            continue
+        link.company_id = target_id
+        if link.is_primary and has_primary:
+            link.is_primary = False
+        elif link.is_primary:
+            has_primary = True
+
+
 @router.post("/merge", summary="合并客户")
 async def merge_companies(
     payload: CompanyMergeIn,
@@ -311,6 +380,7 @@ async def merge_companies(
         await _company_or_404(db, source_id)
 
     for source_id in source_ids:
+        await _merge_contact_links(db, source_id, target.id)
         result = await db.execute(update(Contact).where(Contact.company_id == source_id).values(company_id=target.id))
         moved_contacts += int(getattr(result, "rowcount", 0) or 0)
         result = await db.execute(
@@ -492,29 +562,7 @@ async def get_company(
     codes = await company_code.codes_of(db, company_id)
     data["business_codes"] = [BusinessCodeOut.model_validate(c).model_dump(mode="json") for c in codes]
 
-    contacts = (
-        (
-            await db.execute(
-                select(Contact)
-                .where(Contact.company_id == company_id, Contact.deleted_at.is_(None))
-                .order_by(Contact.is_primary.desc(), Contact.created_at.asc())
-            )
-        )
-        .scalars()
-        .all()
-    )
-    data["contacts"] = [
-        {
-            "id": str(c.id),
-            "name": c.name,
-            "position": c.position,
-            "email": c.email,
-            "phone": c.phone,
-            "mobile": c.mobile,
-            "is_primary": c.is_primary,
-        }
-        for c in contacts
-    ]
+    data["contacts"] = await contact_link.company_contacts(db, company_id)
 
     opportunities = (
         (

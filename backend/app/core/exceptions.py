@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -11,6 +12,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.error_codes import ErrCode
 from app.core.response import request_id_ctx
+from app.domain.field_labels import field_label
 
 logger = logging.getLogger("app.error")
 
@@ -61,6 +63,66 @@ def _payload(code: int, message: str, data: object | None = None) -> dict[str, o
     }
 
 
+def _localized_reason(err: dict[str, Any]) -> str:
+    """把 pydantic/pydantic-core 的错误类型翻译为业务可读原因。"""
+    err_type = str(err.get("type") or "")
+    ctx = err.get("ctx") or {}
+    if err_type == "missing":
+        return "不能为空"
+    if err_type == "string_too_long":
+        return f"最多 {ctx.get('max_length')} 字"
+    if err_type == "string_too_short":
+        return f"至少 {ctx.get('min_length')} 字"
+    if err_type == "greater_than":
+        return f"必须大于 {ctx.get('gt')}"
+    if err_type == "greater_than_equal":
+        return f"必须大于或等于 {ctx.get('ge')}"
+    if err_type == "less_than":
+        return f"必须小于 {ctx.get('lt')}"
+    if err_type == "less_than_equal":
+        return f"必须小于或等于 {ctx.get('le')}"
+    if err_type in {"int_parsing", "int_type", "float_parsing", "float_type", "decimal_parsing"}:
+        return "格式不正确（应为数字）"
+    if err_type == "bool_parsing":
+        return "格式不正确（应为是/否）"
+    if err_type == "value_error":
+        message = str(ctx.get("error") or err.get("msg") or "")
+        for prefix in ("Value error, ", "Assertion failed, "):
+            if message.startswith(prefix):
+                message = message[len(prefix) :]
+        return message or "取值不合法"
+    return "格式不正确"
+
+
+def _field_of(err: dict[str, Any]) -> str:
+    loc = err.get("loc") or ()
+    for part in reversed(loc):
+        if isinstance(part, str) and part not in {"body", "query", "path", "header", "cookie"}:
+            return field_label(part)
+    return ""
+
+
+def localize_validation_errors(errors: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    """输出「<字段中文名>：<原因>」汇总文案，并返回可 JSON 序列化的明细。"""
+    messages: list[str] = []
+    details: list[dict[str, Any]] = []
+    for err in errors:
+        label = _field_of(err)
+        reason = _localized_reason(err)
+        message = f"{label}：{reason}" if label else reason
+        if message not in messages:
+            messages.append(message)
+        detail: dict[str, Any] = {
+            "type": err.get("type"),
+            "loc": list(err.get("loc") or ()),
+            "message": message,
+        }
+        if "ctx" in err:
+            detail["ctx"] = {key: str(value) for key, value in (err.get("ctx") or {}).items()}
+        details.append(detail)
+    return "；".join(messages) or "参数校验失败", details
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
@@ -71,9 +133,10 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+        message, details = localize_validation_errors(exc.errors())
         return JSONResponse(
             status_code=422,
-            content=_payload(ErrCode.VALIDATION_ERROR, "参数校验失败", exc.errors()),
+            content=_payload(ErrCode.VALIDATION_ERROR, message, details),
         )
 
     @app.exception_handler(StarletteHTTPException)

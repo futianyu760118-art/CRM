@@ -39,7 +39,9 @@ def test_certificate_levels_cover_union() -> None:
 
 
 def test_placeholder_name_falls_back_to_code() -> None:
-    entities = _customer_entities([_row(1, name="/", customer_code="HJ003-1"), _row(2, name="/", customer_code="HJ003-2")])
+    entities = _customer_entities(
+        [_row(1, name="/", customer_code="HJ003-1"), _row(2, name="/", customer_code="HJ003-2")]
+    )
     assert [(e["primary_code"], e["name"]) for e in entities] == [
         ("HJ003-1", "HJ003-1"),
         ("HJ003-2", "HJ003-2"),
@@ -48,7 +50,10 @@ def test_placeholder_name_falls_back_to_code() -> None:
 
 def test_same_code_rows_collapse_to_one_customer() -> None:
     entities = _customer_entities(
-        [_row(1, name="宁波多赛", customer_code="C1", phone="111"), _row(2, name="宁波多赛", customer_code="C1", phone="222")]
+        [
+            _row(1, name="宁波多赛", customer_code="C1", phone="111"),
+            _row(2, name="宁波多赛", customer_code="C1", phone="222"),
+        ]
     )
     assert len(entities) == 1
     assert entities[0]["name"] == "宁波多赛"
@@ -58,14 +63,20 @@ def test_same_code_rows_collapse_to_one_customer() -> None:
 def test_same_name_different_code_stays_split() -> None:
     # 联系人标识不同 → 即使同名也必须是两个客户（宁波多赛口径）
     entities = _customer_entities(
-        [_row(1, name="宁波多赛", customer_code="C1", phone="111"), _row(2, name="宁波多赛", customer_code="C2", phone="222")]
+        [
+            _row(1, name="宁波多赛", customer_code="C1", phone="111"),
+            _row(2, name="宁波多赛", customer_code="C2", phone="222"),
+        ]
     )
     assert sorted(e["primary_code"] for e in entities) == ["C1", "C2"]
 
 
 def test_same_name_identical_contacts_merge() -> None:
     entities = _customer_entities(
-        [_row(1, name="某客户", customer_code="C1", phone="111"), _row(2, name="某客户", customer_code="C2", phone="111")]
+        [
+            _row(1, name="某客户", customer_code="C1", phone="111"),
+            _row(2, name="某客户", customer_code="C2", phone="111"),
+        ]
     )
     assert len(entities) == 1
     assert entities[0]["codes"] == ["C1", "C2"]
