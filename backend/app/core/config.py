@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     # 入站摄入 Bearer Token（EBMS → CRM 同步通道鉴权）。
     # 生产必须显式设置强随机值，禁止沿用默认口令（红线）。
     EBMS_INBOUND_TOKEN: str = ""
+    # EDP LeadIntakeV1 → CRM 内部入站服务令牌；生产必须显式配置。
+    AEOS_LEAD_INBOUND_TOKEN: str = ""
 
     # MinIO
     MINIO_ENDPOINT: str = "localhost:9000"

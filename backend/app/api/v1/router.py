@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     activities,
+    aeos_lead,
     approvals,
     audit_logs,
     auth,
@@ -78,6 +79,7 @@ api_router.include_router(integrations.router)
 # M6 EBMS 集成（AEOS 契约）
 api_router.include_router(ebms.router)
 api_router.include_router(ebms_ingest.router)
+api_router.include_router(aeos_lead.router)
 
 # 通用文件
 api_router.include_router(files.router)
