@@ -31,6 +31,7 @@ class Lead(BusinessModel):
     country: Mapped[str | None] = mapped_column(String(50), nullable=True)
     industry: Mapped[str | None] = mapped_column(String(100), nullable=True)
     source: Mapped[str] = mapped_column(String(50), default="EXHIBITION", nullable=False)
+    external_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(20), default="NEW", nullable=False, index=True)
     assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     converted_company_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True), nullable=True)

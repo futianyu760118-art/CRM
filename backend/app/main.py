@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from app.api.v1.router import api_router
+from app.api.v1.router import api_router, internal_router
 from app.core import response as resp
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
@@ -85,6 +85,7 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
+app.include_router(internal_router)
 
 
 @app.get("/health", tags=["系统"], summary="健康检查")
