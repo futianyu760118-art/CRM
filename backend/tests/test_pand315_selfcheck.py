@@ -68,7 +68,7 @@ def test_dictionary_codes_and_labels_are_stable() -> None:
 def test_normalize_name_email_phone() -> None:
     assert dedup.normalize_name("  Ningbo   Dosa  ") == "ningbo dosa"
     assert dedup.normalize_email("  Sales@Example.COM ") == "sales@example.com"
-    assert dedup.normalize_phone("+86 138-0013-8000") == "8613800138000"
+    assert dedup.normalize_phone("+86 138-0013-8000") == "13800138000"  # 剥离中国国家码（PAND-325 R1）
     assert dedup.normalize_phone("123") == ""  # 短号不参与匹配
 
 

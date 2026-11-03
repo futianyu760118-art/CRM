@@ -49,15 +49,18 @@ def last_followup_expr(column: Any) -> ColumnElement[datetime]:
 
 
 def dormant_condition(column: Any, now: datetime) -> ColumnElement[bool]:
-    """休眠：非新客户，且（状态为未合作休眠 / 最近跟进超 180 天 / 无跟进且建档超 180 天）。"""
+    """休眠：非新客户，且（状态为未合作休眠 / 最近跟进超 180 天 / 无跟进且建档超 180 天）。
+
+    严格大于 180 天才休眠，恰好 180 天仍归活跃（CUST-02「> 180 天」）。
+    """
     older = now - timedelta(days=DORMANT_DAYS)
     last_followup = last_followup_expr(column)
     return and_(
         not_(new_condition(column, now)),
         or_(
             column.customer_status == DORMANT_CUSTOMER_STATUS,
-            last_followup <= older,
-            and_(last_followup.is_(None), column.created_at <= older),
+            last_followup < older,
+            and_(last_followup.is_(None), column.created_at < older),
         ),
     )
 
@@ -93,10 +96,10 @@ def classify(
     older = now - timedelta(days=DORMANT_DAYS)
     if customer_status == DORMANT_CUSTOMER_STATUS:
         return GROUP_DORMANT, f"休眠判定：客户状态为「{DORMANT_CUSTOMER_STATUS}」"
-    if last_followup_at is not None and last_followup_at <= older:
+    if last_followup_at is not None and last_followup_at < older:
         days = max((now - last_followup_at).days, 0)
         return GROUP_DORMANT, f"休眠判定：最近跟进 {days} 天前"
-    if last_followup_at is None and created_at <= older:
+    if last_followup_at is None and created_at < older:
         days = max((now - created_at).days, 0)
         return GROUP_DORMANT, f"休眠判定：无跟进记录且建档 {days} 天"
     return GROUP_ACTIVE, "活跃客户：近 180 天有跟进或已有成交订单"

@@ -76,6 +76,27 @@ def _check_plan_date(plan_date: date | None, floor: date) -> date:
     return plan_date
 
 
+def resolve_send_date(send_date: date | None, existing: date | None, today: date) -> date:
+    """寄出日期：缺省回填当天，且不得晚于今天。"""
+    value = send_date or existing or today
+    if value > today:
+        raise _bad(f"寄出日期：不得晚于今天（{today.isoformat()}）")
+    return value
+
+
+def resolve_feedback_date(
+    feedback_date: date | None,
+    existing: date | None,
+    send_date: date | None,
+    today: date,
+) -> date:
+    """反馈日期：缺省回填当天，且不得早于寄出日期。"""
+    value = feedback_date or existing or today
+    if send_date is not None and value < send_date:
+        raise _bad(f"反馈日期：不得早于寄出日期（{send_date.isoformat()}）")
+    return value
+
+
 @router.get("", summary="样品列表")
 async def list_samples(
     db: DbSession,
@@ -228,24 +249,30 @@ async def transition_sample(
 
     extra = payload.model_dump(exclude_unset=True)
     extras = {k: v for k, v in extra.items() if k != "status" and v is not None}
+    today = date.today()
 
     if target == "sent" and target != row.status:
         missing = [
             label
-            for field, label in (("courier", "快递公司"), ("tracking_no", "快递单号"), ("send_date", "寄出日期"))
+            for field, label in (("courier", "快递公司"), ("tracking_no", "快递单号"))
             if not (extras.get(field) or getattr(row, field))
         ]
         if missing:
             raise _bad(f"流转至【已寄出】失败：缺少必填项——{'、'.join(missing)}")
+        extras["send_date"] = resolve_send_date(extras.get("send_date"), row.send_date, today)
 
     if target == "feedback" and target != row.status:
         missing = [
             label
-            for field, label in (("feedback", "客户反馈"), ("feedback_date", "反馈日期"))
+            for field, label in (("feedback", "客户反馈"),)
             if not (extras.get(field) or getattr(row, field))
         ]
         if missing:
             raise _bad(f"流转至【客户反馈】失败：缺少必填项——{'、'.join(missing)}")
+        sent_on = row.send_date or extras.get("send_date")
+        extras["feedback_date"] = resolve_feedback_date(
+            extras.get("feedback_date"), row.feedback_date, sent_on, today
+        )
 
     if "tracking_no" in extras:
         await _ensure_tracking_free(db, extras["tracking_no"], exclude_id=row.id)

@@ -1,7 +1,7 @@
 """线索/客户查重（PAND-314 §3.2，LEAD-02 / LEAD-03）。
 
 判定口径：
-- 确定重复：名称去首尾空格、忽略大小写全等；邮箱去空格转小写全等；电话仅保留数字全等。
+- 确定重复：名称去首尾空格、忽略大小写全等；邮箱去空格转小写全等；电话去非数字并剥离中国国家码（+86/0086/86）后全等。
 - 疑似重复：邮箱域名一致但名称不同（免费邮箱除外）；名称去法律后缀归一后一致。
 - 空名称/空邮箱/空电话不参与匹配；软删不参与。
 
@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.business import Activity, Company, Contact, Lead
@@ -95,6 +95,13 @@ _CN_LEGAL_SUFFIX = re.compile(r"(股份有限公司|有限责任公司|有限公
 _NON_NAME_CHARS = re.compile(r"[^0-9a-z一-鿿]+")
 _NON_DIGITS = re.compile(r"[^0-9]+")
 
+#: 电话最短有效位数（短号不参与判重）
+PHONE_MIN_DIGITS = 6
+#: 中国国家码：``0086`` 或 ``86``；剥离后国内号码至少 10 位
+CN_COUNTRY_CODE = "86"
+CN_COUNTRY_CODE_INTL = "0086"
+PHONE_MIN_NATIONAL_DIGITS = 10
+
 
 def normalize_name(value: str | None) -> str:
     """名称去首尾空白、合并内部空白、忽略大小写。"""
@@ -105,10 +112,22 @@ def normalize_email(value: str | None) -> str:
     return (value or "").strip().lower()
 
 
+def strip_phone_country_code(digits: str) -> str:
+    """剥离中国国家码：``0086`` 优先，其次 ``86``；仅在国内号码位数足够时剥离。
+
+    位数门限避免把恰好以 86 开头的非中国号码（如 11 位号段）误当国家码。
+    """
+    if digits.startswith(CN_COUNTRY_CODE_INTL) and len(digits) >= len(CN_COUNTRY_CODE_INTL) + PHONE_MIN_NATIONAL_DIGITS:
+        return digits[len(CN_COUNTRY_CODE_INTL) :]
+    if digits.startswith(CN_COUNTRY_CODE) and len(digits) >= len(CN_COUNTRY_CODE) + PHONE_MIN_NATIONAL_DIGITS:
+        return digits[len(CN_COUNTRY_CODE) :]
+    return digits
+
+
 def normalize_phone(value: str | None) -> str:
-    """电话仅保留数字；不足 6 位视为无效，避免短号误命中。"""
-    digits = _NON_DIGITS.sub("", value or "")
-    return digits if len(digits) >= 6 else ""
+    """电话仅保留数字并剥离中国国家码；不足 6 位视为无效，避免短号误命中。"""
+    digits = strip_phone_country_code(_NON_DIGITS.sub("", value or ""))
+    return digits if len(digits) >= PHONE_MIN_DIGITS else ""
 
 
 def email_domain(value: str | None) -> str:
@@ -167,7 +186,27 @@ def _like(value: str) -> str:
 
 
 def _digits_expr(column: Any) -> Any:
-    return func.regexp_replace(func.coalesce(column, ""), "[^0-9]", "", "g")
+    """SQL 侧与 :func:`normalize_phone` 同口径：取数字后剥离中国国家码。"""
+    digits = func.regexp_replace(func.coalesce(column, ""), "[^0-9]", "", "g")
+    intl_len = len(CN_COUNTRY_CODE_INTL) + PHONE_MIN_NATIONAL_DIGITS
+    code_len = len(CN_COUNTRY_CODE) + PHONE_MIN_NATIONAL_DIGITS
+    return case(
+        (
+            and_(
+                func.length(digits) >= intl_len,
+                func.substr(digits, 1, len(CN_COUNTRY_CODE_INTL)) == CN_COUNTRY_CODE_INTL,
+            ),
+            func.substr(digits, len(CN_COUNTRY_CODE_INTL) + 1),
+        ),
+        (
+            and_(
+                func.length(digits) >= code_len,
+                func.substr(digits, 1, len(CN_COUNTRY_CODE)) == CN_COUNTRY_CODE,
+            ),
+            func.substr(digits, len(CN_COUNTRY_CODE) + 1),
+        ),
+        else_=digits,
+    )
 
 
 async def _owner_names(db: AsyncSession, owner_ids: set[uuid.UUID]) -> dict[uuid.UUID, str]:
@@ -594,4 +633,5 @@ __all__ = [
     "normalize_name",
     "normalize_phone",
     "shares_email_domain",
+    "strip_phone_country_code",
 ]
