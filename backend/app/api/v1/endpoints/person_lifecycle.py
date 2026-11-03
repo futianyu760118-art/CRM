@@ -215,11 +215,11 @@ async def _release_assignments(db: AsyncSession, user_id: uuid.UUID) -> dict[str
     return changed
 
 
-def _previous_assignment_count(logs: list[IntegrationLog], object_id: str) -> int:
+def _previous_assignment_count(logs: list[IntegrationLog], event: PersonLifecycleEvent) -> int:
     count = 0
     for log in logs:
         payload = log.request_payload or {}
-        if payload.get("object_id") != object_id or payload.get("event_type") != "person.offboarded":
+        if payload.get("tenant_id") != event.tenant_id or payload.get("object_id") != event.object_id or payload.get("event_type") != "person.offboarded":
             continue
         changed = log.response_payload.get("changed", {}) if log.response_payload else {}
         count = max(count, sum(int(changed.get(key, 0)) for key in ("owners", "tasks", "approvals")))
@@ -228,6 +228,9 @@ def _previous_assignment_count(logs: list[IntegrationLog], object_id: str) -> in
 
 def _existing_result(logs: list[IntegrationLog], event: PersonLifecycleEvent) -> dict[str, Any] | None:
     for log in logs:
+        payload = log.request_payload or {}
+        if payload.get("tenant_id") != event.tenant_id:
+            continue
         if log.idempotency_key == event.idempotency_key or log.request_id == event.event_id:
             result = dict(log.response_payload or {})
             result["duplicate"] = True
@@ -235,11 +238,11 @@ def _existing_result(logs: list[IntegrationLog], event: PersonLifecycleEvent) ->
     return None
 
 
-def _latest_revision(logs: list[IntegrationLog], object_id: str) -> int:
+def _latest_revision(logs: list[IntegrationLog], event: PersonLifecycleEvent) -> int:
     latest = 0
     for log in logs:
         payload = log.request_payload or {}
-        if payload.get("object_id") == object_id:
+        if payload.get("tenant_id") == event.tenant_id and payload.get("object_id") == event.object_id:
             latest = max(latest, int(payload.get("revision", 0)))
     return latest
 
@@ -273,12 +276,18 @@ async def _remove_user_roles(db: AsyncSession, user_id: uuid.UUID) -> int:
 
 async def apply_person_lifecycle_event(db: AsyncSession, event: PersonLifecycleEvent) -> dict[str, Any]:
     """在当前 CRM 事务中应用一条人员生命周期事件。"""
+    configured_tenant = os.getenv("AEOS_TENANT_ID", "").strip()
+    if configured_tenant and event.tenant_id != configured_tenant:
+        result = _base_result(event, status="failed", changed={})
+        result["reason"] = "tenant_mismatch"
+        result["last_error_code"] = "TENANT_BOUNDARY"
+        return result
     logs = await _lifecycle_logs(db)
     duplicate = _existing_result(logs, event)
     if duplicate is not None:
         return duplicate
 
-    if _latest_revision(logs, event.object_id) > event.revision:
+    if _latest_revision(logs, event) > event.revision:
         result = _base_result(event, status="skipped", changed={})
         result["reason"] = "stale_revision"
         _save_log(db, event, result, status="SKIPPED")
@@ -314,7 +323,7 @@ async def apply_person_lifecycle_event(db: AsyncSession, event: PersonLifecycleE
     user.is_superuser = False
     await _remove_user_roles(db, user.id)
     user.roles = []
-    assignment_pending = _previous_assignment_count(logs, event.object_id)
+    assignment_pending = _previous_assignment_count(logs, event)
     result = _base_result(
         event,
         status="pending_confirmation",
