@@ -22,6 +22,7 @@ from app.api.v1.endpoints import (
     leads,
     opportunities,
     orders,
+    person_lifecycle,
     pricing,
     products,
     quotations,
@@ -34,6 +35,7 @@ from app.api.v1.endpoints import (
 )
 
 api_router = APIRouter()
+internal_router = APIRouter()
 
 # 系统 / 认证
 api_router.include_router(auth.router)
@@ -80,6 +82,8 @@ api_router.include_router(integrations.router)
 api_router.include_router(ebms.router)
 api_router.include_router(ebms_ingest.router)
 api_router.include_router(aeos_lead.router)
+api_router.include_router(person_lifecycle.router)
+internal_router.include_router(person_lifecycle.router)
 
 # 通用文件
 api_router.include_router(files.router)
