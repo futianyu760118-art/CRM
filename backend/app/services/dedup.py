@@ -574,13 +574,17 @@ async def check_company_duplicates(
     for row in contacts:
         if row.company_id is None:
             continue
-        row_reasons = reasons.setdefault(row.company_id, [])
+        contact_reasons: list[str] = []
         if norm_email and is_same_email(row.email, email):
-            row_reasons.append("联系人邮箱一致")
+            contact_reasons.append("联系人邮箱一致")
         elif shares_email_domain(row.email, email):
-            row_reasons.append("邮箱域名一致")
+            contact_reasons.append("邮箱域名一致")
         if digits and any(is_same_phone(row.phone, value) or is_same_phone(row.mobile, value) for value in digits):
-            row_reasons.append("联系人电话一致")
+            contact_reasons.append("联系人电话一致")
+        if not contact_reasons:
+            # 免费邮箱域名会被 SQL 预筛取回，但不算重复原因；不得创建空 reason 条目
+            continue
+        reasons.setdefault(row.company_id, []).extend(contact_reasons)
 
     definite: list[dict[str, Any]] = []
     suspected: list[dict[str, Any]] = []
