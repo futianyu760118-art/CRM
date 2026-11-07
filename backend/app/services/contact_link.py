@@ -44,11 +44,14 @@ async def _get_or_create_link(
     db: AsyncSession,
     contact: Contact,
     company_id: uuid.UUID,
-    relation_type: str,
+    relation_type: str | None = None,
 ) -> ContactCompanyLink:
+    """取或建关联；``relation_type`` 为空表示保留已有关系，新建时取默认「其他」。"""
+    effective = relation_type or dic.CONTACT_RELATION_DEFAULT
     link = await _active_link(db, contact.id, company_id)
     if link is not None:
-        link.relation_type = relation_type
+        if relation_type is not None:
+            link.relation_type = relation_type
         return link
     # 会话 autoflush=False：同事务内已 add 未 flush 的 link 对 SELECT 不可见，
     # 直接复用，避免二次 db.add 触发 uq_contact_company_link 唯一约束冲突。
@@ -59,7 +62,8 @@ async def _get_or_create_link(
             and pending.company_id == company_id
             and pending.deleted_at is None
         ):
-            pending.relation_type = relation_type
+            if relation_type is not None:
+                pending.relation_type = relation_type
             return pending
     # 软删行仍占用 (contact_id, company_id) 唯一键，复用并复活
     stale = (
@@ -72,13 +76,13 @@ async def _get_or_create_link(
     ).scalar_one_or_none()
     if stale is not None:
         stale.deleted_at = None
-        stale.relation_type = relation_type
+        stale.relation_type = effective
         stale.is_primary = False
         return stale
     link = ContactCompanyLink(
         contact_id=contact.id,
         company_id=company_id,
-        relation_type=relation_type,
+        relation_type=effective,
         is_primary=False,
         owner_id=contact.owner_id,
         department_id=contact.department_id,
@@ -91,10 +95,13 @@ async def attach_company(
     db: AsyncSession,
     contact: Contact,
     company_id: uuid.UUID,
-    relation_type: str = dic.CONTACT_RELATION_DEFAULT,
+    relation_type: str | None = None,
     is_primary: bool = False,
 ) -> ContactCompanyLink:
-    """为联系人新增/更新某客户关联；主档无主公司时回填。"""
+    """为联系人新增/更新某客户关联；主档无主公司时回填。
+
+    ``relation_type`` 为空时既有关系保留原值，新建关系默认「其他」。
+    """
     link = await _get_or_create_link(db, contact, company_id, relation_type)
     if contact.company_id is None:
         contact.company_id = company_id
@@ -132,7 +139,7 @@ async def set_primary(
         .values(is_primary=False, updated_at=utcnow())
     )
     if link is None:
-        link = await _get_or_create_link(db, contact, company_id, dic.CONTACT_RELATION_DEFAULT)
+        link = await _get_or_create_link(db, contact, company_id)
     link.is_primary = True
     contact.company_id = company_id
     contact.is_primary = True

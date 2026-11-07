@@ -67,8 +67,9 @@ async def _same_person(db: DbSession, payload: ContactCreate) -> Contact | None:
     for value in (payload.phone, payload.mobile):
         digits = dedup.normalize_phone(value)
         if digits:
-            conds.append(func.regexp_replace(func.coalesce(Contact.phone, ""), "[^0-9]", "", "g") == digits)
-            conds.append(func.regexp_replace(func.coalesce(Contact.mobile, ""), "[^0-9]", "", "g") == digits)
+            # 库侧与 normalize_phone 同口径（取数字后剥国家码），否则 +86 存储永远命中不了
+            conds.append(dedup._digits_expr(Contact.phone) == digits)
+            conds.append(dedup._digits_expr(Contact.mobile) == digits)
     wechat = (payload.wechat or "").strip().lower()
     if wechat:
         conds.append(func.lower(Contact.wechat) == wechat)
@@ -206,7 +207,7 @@ async def update_contact(
             db,
             row,
             payload.company_id,
-            relation_type=payload.relation_type or dic.CONTACT_RELATION_DEFAULT,
+            relation_type=payload.relation_type,
             is_primary=bool(payload.is_primary),
         )
     elif payload.relation_type and row.company_id:
