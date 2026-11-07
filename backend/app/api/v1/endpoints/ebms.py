@@ -27,6 +27,7 @@ from app.contracts.aeos import (
     unknown_fields,
     validate_contract,
 )
+from app.contracts.compat import normalize_outbound
 from app.core import response as resp
 from app.core.deps import DbSession, require_permission
 from app.models.integration import IntegrationLog, IntegrationOutbox
@@ -43,11 +44,16 @@ from app.schemas.ebms import (
 )
 from app.schemas.integration import IntegrationLogOut
 from app.services import ebms
+from app.services import verify as verify_service
 from app.services.query import apply_sort, paginate
 
 router = APIRouter(prefix="/integrations/ebms", tags=["M6-EBMS集成"])
 
-_EVENT_ACTION = {ebms.EVENT_RESULT: ebms.ACTION_RESULT, ebms.EVENT_EXCEPTION: ebms.ACTION_EXCEPTION}
+_EVENT_ACTION = {
+    ebms.EVENT_RESULT: ebms.ACTION_RESULT,
+    ebms.EVENT_EXCEPTION: ebms.ACTION_EXCEPTION,
+    ebms.EVENT_ENTITY_V2: ebms.ACTION_ENTITY_V2,
+}
 
 
 @router.get("/contracts/baseline", summary="CRM 侧契约字段基线（供与 EBMS contracts 对照）")
@@ -82,7 +88,7 @@ async def validate(
     _: User = Depends(require_permission("integration:view")),
 ) -> dict[str, Any]:
     try:
-        contract = validate_contract(payload.contract)
+        contract = validate_contract(normalize_outbound(payload.contract))
     except ContractValidationError as exc:
         return resp.ok(
             ContractValidateOut(
@@ -107,7 +113,7 @@ async def validate(
 async def pilot_a_result(
     payload: PilotResultIn,
     db: DbSession,
-    _: User = Depends(require_permission("integration:view")),
+    current: User = Depends(require_permission("integration:view")),
 ) -> dict[str, Any]:
     result = await ebms.emit_sales_result(
         db,
@@ -117,6 +123,19 @@ async def pilot_a_result(
         currency=payload.currency,
         limit=payload.limit,
     )
+    if payload.auto_verify:
+        # 试点联调：submitted → passed 验证后才出站 VERIFIED Result（F5-A04 唯一路径）
+        outcome = await verify_service.verify_result(
+            db,
+            subject_id=result["result_id"],
+            verifier=current.id,
+            status="passed",
+            comment="pilot-a auto verify",
+        )
+        result["status"] = outcome["result"]["status"]
+        result["verification"] = outcome["verification"]
+        result["result_delivery"] = outcome["delivery"]
+        result["result_event"] = outcome["event"]
     if payload.deliver:
         result["delivery"] = await ebms.deliver_pending(db)
     await db.commit()

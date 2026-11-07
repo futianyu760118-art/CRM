@@ -23,8 +23,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.models.business import Company, Inquiry, InquiryItem
 from app.models.integration import IntegrationLog, IntegrationOutbox
 from app.models.pricing import Quotation
-from app.models.sales import SalesOrder
+from app.models.sales import SalesOrder, SalesResult
+from app.models.verification import Verification
 from app.services import ebms, ebms_sync
+from app.services import verify as verify_service
 from app.services.ebms_transport import DeliveryResult, EbmsTransport
 
 TEST_DB_URL = os.environ.get("CRM_TEST_DATABASE_URL")
@@ -44,9 +46,13 @@ async def _clean(session) -> None:
     await session.execute(delete(IntegrationLog).where(IntegrationLog.system == "EBMS"))
     await session.execute(
         delete(IntegrationOutbox).where(
-            IntegrationOutbox.event_type.in_((ebms.EVENT_RESULT, ebms.EVENT_EXCEPTION, ebms.EVENT_ENTITY))
+            IntegrationOutbox.event_type.in_(
+                (ebms.EVENT_RESULT, ebms.EVENT_EXCEPTION, ebms.EVENT_ENTITY, ebms.EVENT_ENTITY_V2)
+            )
         )
     )
+    await session.execute(delete(Verification).where(Verification.subject_type == verify_service.SUBJECT_TYPE_RESULT))
+    await session.execute(delete(SalesResult).where(SalesResult.result_id.like("RES-M05-%")))
     await session.execute(delete(Quotation).where(Quotation.quotation_no.like(f"{CODE_PREFIX}%")))
     await session.execute(delete(SalesOrder).where(SalesOrder.order_no.like(f"{CODE_PREFIX}%")))
     inquiry_ids = select(Inquiry.id).where(Inquiry.inquiry_no.like(f"{CODE_PREFIX}%"))
@@ -141,6 +147,41 @@ async def _outbox_count(session, event_type: str) -> int:
     )
 
 
+async def _verify(session, result_id: str, *, status: str = "passed", reason: str | None = None):
+    """走 F5 唯一联动路径：verify 接受后才产生 Result 出站。"""
+    return await verify_service.verify_result(
+        session,
+        subject_id=result_id,
+        verifier=uuid.uuid4(),
+        status=status,
+        reason=reason,
+    )
+
+
+async def _emit_verified_result(
+    session,
+    *,
+    period_start: date = date(2026, 10, 7),
+    period_end: date = date(2026, 10, 7),
+    metric_code: str = "order_amount",
+    currency: str = "RMB",
+) -> dict:
+    """聚合 → submitted → verify，并移除 V2 事件出站，隔离 Result 投递用例。"""
+    out = await ebms.emit_sales_result(
+        session,
+        period_start=period_start,
+        period_end=period_end,
+        metric_code=metric_code,
+        currency=currency,
+    )
+    await _verify(session, out["result_id"])
+    # SalesResultVerified（AEOS.Event.V2）由独立用例覆盖；此处只测 Result 投递通道。
+    await session.execute(delete(IntegrationLog).where(IntegrationLog.action == ebms.ACTION_ENTITY_V2))
+    await session.execute(delete(IntegrationOutbox).where(IntegrationOutbox.event_type == ebms.EVENT_ENTITY_V2))
+    await session.flush()
+    return out
+
+
 # ---------------------------------------------------------------- 试点 A
 
 
@@ -166,9 +207,17 @@ class TestPilotASalesResult:
         assert out["metric_value"] == 300.75
         assert out["order_count"] == 2
         assert out["evidence_count"] == 2
+        assert out["status"] == "submitted"
         assert out["contract_id"].startswith("RES-M05-ORDER_AMOUNT-20261007-20261007-RMB")
 
-        logs = await _ebms_logs(session)
+        # F5-A02：submitted ≠ verified，未验证前不得出站
+        assert await _outbox_count(session, ebms.EVENT_RESULT) == 0
+        assert await _outbox_count(session, ebms.EVENT_ENTITY_V2) == 0
+        assert await _ebms_logs(session) == []
+
+        assert (await _verify(session, out["result_id"]))["result"]["status"] == "verified"
+
+        logs = [log for log in await _ebms_logs(session) if log.action == ebms.ACTION_RESULT]
         assert len(logs) == 1
         contract = logs[0].request_payload
         assert contract["contract_version"] == "AEOS.Result.V1"
@@ -203,7 +252,10 @@ class TestPilotASalesResult:
         )
         assert avg["metric_value"] == 150.0
 
-        # 两个不同指标 → 两条独立投递
+        # 两个不同指标 → 两条独立 submitted 结果；验证后各自独立投递
+        assert await _outbox_count(session, ebms.EVENT_RESULT) == 0
+        await _verify(session, count["result_id"])
+        await _verify(session, avg["result_id"])
         assert await _outbox_count(session, ebms.EVENT_RESULT) == 2
 
     async def test_empty_period_produces_zero_result(self, session) -> None:
@@ -236,8 +288,15 @@ class TestIdempotency:
 
         assert first["created"] is True
         assert second["created"] is False and second["skipped"] is True
-        assert await _outbox_count(session, ebms.EVENT_RESULT) == 1
-        assert len(await _ebms_logs(session)) == 1
+        assert second["revision"] == first["revision"] == 1
+        # 未验证 → 无出站；结果行 upsert 为同一条
+        assert await _outbox_count(session, ebms.EVENT_RESULT) == 0
+        assert await _ebms_logs(session) == []
+        assert (
+            await session.execute(
+                select(func.count()).select_from(SalesResult).where(SalesResult.result_id.like("RES-M05-%"))
+            )
+        ).scalar_one() == 1
 
     async def test_changed_metric_value_produces_new_delivery(self, session) -> None:
         company = await _seed_company(session)
@@ -245,17 +304,21 @@ class TestIdempotency:
         await _seed_quotation(session, company, amount=100.0, approved_at=datetime(2026, 10, 7, 10, 0, tzinfo=UTC))
         first = await ebms.emit_sales_result(session, period_start=today, period_end=today)
 
-        # 期内新增一笔成交 → 指标值变化 → 应产生新投递
+        # 期内新增一笔成交 → 指标值变化 → 业务字段变更，revision +1 并重新进入 submitted
         await _seed_quotation(session, company, amount=50.0, approved_at=datetime(2026, 10, 7, 11, 0, tzinfo=UTC))
         second = await ebms.emit_sales_result(session, period_start=today, period_end=today)
 
         assert first["created"] is True
         assert second["created"] is True
-        assert await _outbox_count(session, ebms.EVENT_RESULT) == 2
-        logs = await _ebms_logs(session)
-        assert len(logs) == 2
-        assert logs[0].idempotency_key != logs[1].idempotency_key
+        assert second["revision"] == first["revision"] + 1
         assert first["metric_value"] != second["metric_value"]
+        assert await _outbox_count(session, ebms.EVENT_RESULT) == 0
+
+        verified = await _verify(session, second["result_id"])
+        assert verified["result"]["status"] == "verified"
+        logs = [log for log in await _ebms_logs(session) if log.action == ebms.ACTION_RESULT]
+        assert len(logs) == 1
+        assert logs[0].request_payload["metric"]["value"] == second["metric_value"]
 
 
 # ---------------------------------------------------------------- 试点 B
@@ -411,9 +474,8 @@ class TestDelivery:
 
     async def test_deliver_to_spool_marks_log_and_outbox(self, session, tmp_path: Path) -> None:
         company = await _seed_company(session)
-        today = date(2026, 10, 7)
         await _seed_quotation(session, company, amount=100.0, approved_at=datetime(2026, 10, 7, 10, 0, tzinfo=UTC))
-        await ebms.emit_sales_result(session, period_start=today, period_end=today)
+        await _emit_verified_result(session)
 
         result = await ebms.deliver_pending(session, transport=EbmsTransport(mode="spool", spool_dir=str(tmp_path)))
 
@@ -432,9 +494,8 @@ class TestDelivery:
 
     async def test_second_deliver_picks_nothing(self, session, tmp_path: Path) -> None:
         company = await _seed_company(session)
-        today = date(2026, 10, 7)
         await _seed_quotation(session, company, approved_at=datetime(2026, 10, 7, 10, 0, tzinfo=UTC))
-        await ebms.emit_sales_result(session, period_start=today, period_end=today)
+        await _emit_verified_result(session)
         transport = EbmsTransport(mode="spool", spool_dir=str(tmp_path))
 
         await ebms.deliver_pending(session, transport=transport)
@@ -447,9 +508,8 @@ class TestDelivery:
 
     async def test_failure_is_logged_with_backoff(self, session) -> None:
         company = await _seed_company(session)
-        today = date(2026, 10, 7)
         await _seed_quotation(session, company, approved_at=datetime(2026, 10, 7, 10, 0, tzinfo=UTC))
-        await ebms.emit_sales_result(session, period_start=today, period_end=today)
+        await _emit_verified_result(session)
 
         result = await ebms.deliver_pending(session, transport=EbmsTransport(mode="http", ingest_url=""))
 
@@ -467,9 +527,8 @@ class TestDelivery:
 
     async def test_retry_redelivers_for_real(self, session, tmp_path: Path) -> None:
         company = await _seed_company(session)
-        today = date(2026, 10, 7)
         await _seed_quotation(session, company, approved_at=datetime(2026, 10, 7, 10, 0, tzinfo=UTC))
-        await ebms.emit_sales_result(session, period_start=today, period_end=today)
+        await _emit_verified_result(session)
         await ebms.deliver_pending(session, transport=EbmsTransport(mode="http", ingest_url=""))
         log = (await _ebms_logs(session))[0]
         assert log.status == "FAILED"
@@ -487,9 +546,8 @@ class TestDelivery:
 
     async def test_retry_successful_log_is_noop(self, session, tmp_path: Path) -> None:
         company = await _seed_company(session)
-        today = date(2026, 10, 7)
         await _seed_quotation(session, company, approved_at=datetime(2026, 10, 7, 10, 0, tzinfo=UTC))
-        await ebms.emit_sales_result(session, period_start=today, period_end=today)
+        await _emit_verified_result(session)
         await ebms.deliver_pending(session, transport=EbmsTransport(mode="spool", spool_dir=str(tmp_path)))
         log = (await _ebms_logs(session))[0]
 
@@ -498,9 +556,8 @@ class TestDelivery:
 
     async def test_exceeding_max_retry_goes_dead_letter(self, session) -> None:
         company = await _seed_company(session)
-        today = date(2026, 10, 7)
         await _seed_quotation(session, company, approved_at=datetime(2026, 10, 7, 10, 0, tzinfo=UTC))
-        await ebms.emit_sales_result(session, period_start=today, period_end=today)
+        await _emit_verified_result(session)
         log = (await _ebms_logs(session))[0]
         log.max_retry = 1
         await session.flush()
@@ -513,9 +570,8 @@ class TestDelivery:
 
     async def test_retry_on_dead_letter_log_reports_dead_letter(self, session) -> None:
         company = await _seed_company(session)
-        today = date(2026, 10, 7)
         await _seed_quotation(session, company, approved_at=datetime(2026, 10, 7, 10, 0, tzinfo=UTC))
-        await ebms.emit_sales_result(session, period_start=today, period_end=today)
+        await _emit_verified_result(session)
         log = (await _ebms_logs(session))[0]
         log.max_retry = 1
         await session.flush()
@@ -528,10 +584,9 @@ class TestDelivery:
 class TestReconcile:
     async def test_consistent_after_delivery(self, session, tmp_path: Path) -> None:
         company = await _seed_company(session)
-        today = date(2026, 10, 7)
         await _seed_quotation(session, company, amount=100.0, approved_at=datetime(2026, 10, 7, 10, 0, tzinfo=UTC))
         await _seed_sales_order(session, created_at=OVERDUE_AT)
-        await ebms.emit_sales_result(session, period_start=today, period_end=today)
+        await _emit_verified_result(session)
         await ebms.emit_delivery_overdue(session, sla_days=45, as_of=AS_OF)
         await ebms.deliver_pending(session, transport=EbmsTransport(mode="spool", spool_dir=str(tmp_path)))
 
@@ -543,9 +598,8 @@ class TestReconcile:
 
     async def test_inconsistent_when_delivery_failed(self, session) -> None:
         company = await _seed_company(session)
-        today = date(2026, 10, 7)
         await _seed_quotation(session, company, approved_at=datetime(2026, 10, 7, 10, 0, tzinfo=UTC))
-        await ebms.emit_sales_result(session, period_start=today, period_end=today)
+        await _emit_verified_result(session)
         await ebms.deliver_pending(session, transport=EbmsTransport(mode="http", ingest_url=""))
 
         report = await ebms.reconcile(session)

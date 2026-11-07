@@ -15,13 +15,13 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import BaseModel, BusinessModel
+from app.db.base import AeosObjectMixin, BaseModel, BusinessModel
 
 MONEY = Numeric(18, 4)
 QTY = Numeric(18, 2)
 
 
-class SalesOrder(BusinessModel):
+class SalesOrder(BusinessModel, AeosObjectMixin):
     """订单行（业务键 = order_no + line_no；规避 SQL 保留字 ``order``，表名 ``sales_order``）。"""
 
     __tablename__ = "sales_order"
@@ -54,7 +54,7 @@ class SalesOrder(BusinessModel):
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class Sample(BusinessModel):
+class Sample(BusinessModel, AeosObjectMixin):
     """样品（业务键 = sample_no）。"""
 
     __tablename__ = "sample"
@@ -79,7 +79,7 @@ class Sample(BusinessModel):
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class QuoteLibrary(BaseModel):
+class QuoteLibrary(BusinessModel, AeosObjectMixin):
     """报价库（独立于 Quotation；业务键 = external_model + certificate_level 复合）。"""
 
     __tablename__ = "quote_library"
@@ -109,7 +109,34 @@ class QuoteLibrary(BaseModel):
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class Feedback(BusinessModel):
+class SalesResult(BusinessModel, AeosObjectMixin):
+    """经营结果持久化（PAND-330，架构 §4.3 / F5-A05）。
+
+    生命周期 ``submitted``（执行方声明完成）→ ``verified``（经 verify 接受）。
+    仅 ``verified`` 构造 ``AEOS.Result.V1`` 出站（F5-A02/A04）；L1 线格式
+    ``result_status`` 仍只有 ``VERIFIED``，``submitted`` 是 CRM 内部态。
+    """
+
+    __tablename__ = "sales_result"
+
+    result_id: Mapped[str] = mapped_column(String(200), unique=True, nullable=False, index=True)
+    period_start: Mapped[date] = mapped_column(Date, nullable=False)
+    period_end: Mapped[date] = mapped_column(Date, nullable=False)
+    metric_code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    metric_value: Mapped[float] = mapped_column(MONEY, default=0, nullable=False)
+    metric_unit: Mapped[str] = mapped_column(String(20), nullable=False)
+    calculation_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    currency: Mapped[str] = mapped_column(String(10), default="RMB", nullable=False)
+    order_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    object_ref_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    object_ref_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="submitted", nullable=False, index=True)
+    evidence_refs: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+
+
+class Feedback(BusinessModel, AeosObjectMixin):
     """问题反馈（业务键 = feedback_no，EBMS 未就绪前用三元组指纹）。"""
 
     __tablename__ = "feedback"

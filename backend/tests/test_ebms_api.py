@@ -30,8 +30,10 @@ from app.db.session import get_db
 from app.models.business import Company
 from app.models.integration import IntegrationLog, IntegrationOutbox
 from app.models.pricing import Quotation
-from app.models.sales import SalesOrder
+from app.models.sales import SalesOrder, SalesResult
+from app.models.verification import Verification
 from app.services import ebms
+from app.services import verify as verify_service
 
 TEST_DB_URL = os.environ.get("CRM_TEST_DATABASE_URL")
 
@@ -67,8 +69,14 @@ class _StubUser:
 async def _clean(session) -> None:
     await session.execute(delete(IntegrationLog).where(IntegrationLog.system == "EBMS"))
     await session.execute(
-        delete(IntegrationOutbox).where(IntegrationOutbox.event_type.in_((ebms.EVENT_RESULT, ebms.EVENT_EXCEPTION)))
+        delete(IntegrationOutbox).where(
+            IntegrationOutbox.event_type.in_(
+                (ebms.EVENT_RESULT, ebms.EVENT_EXCEPTION, ebms.EVENT_ENTITY_V2)
+            )
+        )
     )
+    await session.execute(delete(Verification).where(Verification.subject_type == verify_service.SUBJECT_TYPE_RESULT))
+    await session.execute(delete(SalesResult).where(SalesResult.result_id.like("RES-M05-%")))
     await session.execute(delete(Quotation).where(Quotation.quotation_no.like(f"{CODE_PREFIX}%")))
     await session.execute(delete(SalesOrder).where(SalesOrder.order_no.like(f"{CODE_PREFIX}%")))
     await session.execute(delete(Company).where(Company.code.like(f"{CODE_PREFIX}%")))
@@ -224,14 +232,29 @@ async def test_pilot_a_end_to_end_through_http(client, session, seeded, tmp_path
     assert data["created"] is True
     assert data["metric_value"] == 42.5
     assert data["evidence_count"] == 1
-    # 端点默认一并投递（联调一把过）
-    assert data["delivery"]["delivered"] == 1
+    # 端点默认 auto_verify：submitted → verified 后才出站 Result，同时发出 L2 验证事件
+    assert data["status"] == "verified"
+    assert data["result_delivery"]["created"] is True
+    assert data["result_event"]["contract_version"] == "AEOS.Event.V2"
+    assert data["result_event"]["event_type"] == "SalesResultVerified"
+    # 端点默认一并投递（联调一把过）：Result + V2 事件各一条
+    assert data["delivery"]["delivered"] == 2
     assert data["delivery"]["mode"] == "spool"
     assert len(list((tmp_path / ebms.EVENT_RESULT).glob("*.json"))) == 1
+    # spool 按契约体内事件类型归档（X-Event-Type 语义）
+    assert len(list((tmp_path / "SalesResultVerified").glob("*.json"))) == 1
 
-    log = (await session.execute(select(IntegrationLog).where(IntegrationLog.system == "EBMS"))).scalar_one()
+    log = (
+        await session.execute(
+            select(IntegrationLog).where(
+                IntegrationLog.system == "EBMS",
+                IntegrationLog.action == ebms.ACTION_RESULT,
+            )
+        )
+    ).scalar_one()
     assert log.status == "SUCCESS"
     assert log.business_id == data["contract_id"]
+    assert log.compat == "V1x"
 
 
 async def test_pilot_a_idempotent_on_repeat_call(client, seeded) -> None:
@@ -300,16 +323,17 @@ async def test_logs_and_outbox_are_paginated(client, seeded) -> None:
         },
     )
 
+    # auto_verify 产出 Result + SalesResultVerified(V2) 两条日志/出站
     logs = (await client.get("/api/v1/integrations/ebms/logs")).json()["data"]
-    assert logs["total"] == 1
-    assert logs["items"][0]["system"] == "EBMS"
-    assert logs["items"][0]["action"] == ebms.ACTION_RESULT
+    assert logs["total"] == 2
+    assert {item["action"] for item in logs["items"]} == {ebms.ACTION_RESULT, ebms.ACTION_ENTITY_V2}
 
     outbox = (await client.get("/api/v1/integrations/ebms/outbox")).json()["data"]
-    assert outbox["total"] == 1
-    assert outbox["items"][0]["event_type"] == ebms.EVENT_RESULT
-    assert outbox["items"][0]["contract_id"].startswith("RES-M05-")
-    assert outbox["items"][0]["status"] == "PENDING"
+    assert outbox["total"] == 2
+    assert {item["event_type"] for item in outbox["items"]} == {ebms.EVENT_RESULT, ebms.EVENT_ENTITY_V2}
+    result_item = next(item for item in outbox["items"] if item["event_type"] == ebms.EVENT_RESULT)
+    assert result_item["contract_id"].startswith("RES-M05-")
+    assert result_item["status"] == "PENDING"
 
     filtered = (await client.get("/api/v1/integrations/ebms/outbox?status=DONE")).json()["data"]
     assert filtered["total"] == 0
@@ -333,8 +357,9 @@ async def test_deliver_and_reconcile_endpoints(client, seeded) -> None:
     assert before["result"]["delivered"] == 0
     assert before["consistent"] is False
 
+    # Result + SalesResultVerified(V2) 均待投递
     delivered = (await client.post("/api/v1/integrations/ebms/deliver", json={"limit": 10})).json()["data"]
-    assert delivered["picked"] == 1 and delivered["delivered"] == 1
+    assert delivered["picked"] == 2 and delivered["delivered"] == 2
 
     after = (await client.post("/api/v1/integrations/ebms/reconcile")).json()["data"]
     assert after["result"] == {"produced": 1, "delivered": 1, "pending": 0, "failed": 0}
@@ -346,7 +371,14 @@ async def test_retry_endpoint_on_successful_log_is_noop(client, session, seeded)
         "/api/v1/integrations/ebms/pilot-a/result",
         json={"period_start": "2026-10-07", "period_end": "2026-10-07", "currency": TEST_CURRENCY},
     )
-    log = (await session.execute(select(IntegrationLog).where(IntegrationLog.system == "EBMS"))).scalar_one()
+    log = (
+        await session.execute(
+            select(IntegrationLog).where(
+                IntegrationLog.system == "EBMS",
+                IntegrationLog.action == ebms.ACTION_RESULT,
+            )
+        )
+    ).scalar_one()
 
     resp = await client.post(f"/api/v1/integrations/ebms/retry/{log.id}")
     assert resp.status_code == 200

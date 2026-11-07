@@ -24,8 +24,10 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.contracts.aeos import (
+    RESULT_CONTRACT_VERSION,
     ContractValidationError,
     build_event_contract,
+    build_event_v2_contract,
     build_exception_contract,
     build_result_contract,
     delete_event_for,
@@ -34,6 +36,7 @@ from app.contracts.aeos import (
     upsert_event_for,
     validate_contract,
 )
+from app.contracts.compat import compat_marker, normalize_outbound
 from app.core.config import settings
 from app.core.error_codes import ErrCode
 from app.core.exceptions import ApiError, NotFoundError
@@ -41,7 +44,7 @@ from app.db.base import utcnow
 from app.models.business import Company, Inquiry
 from app.models.integration import IntegrationLog, IntegrationOutbox
 from app.models.pricing import Quotation
-from app.models.sales import Feedback, QuoteLibrary, SalesOrder, Sample
+from app.models.sales import Feedback, QuoteLibrary, SalesOrder, SalesResult, Sample
 from app.services.ebms_transport import DeliveryResult, EbmsTransport
 
 # 契约源系统：CRM = M05 销售自治（EBMS/docs/AEOS_V7.2_DATA_OWNERSHIP_V1.md）
@@ -50,14 +53,17 @@ SOURCE_SYSTEM = "M05"
 EVENT_RESULT = "AEOS_RESULT_V1"
 EVENT_EXCEPTION = "AEOS_EXCEPTION_V1"
 EVENT_ENTITY = "AEOS_EVENT_V1"
+EVENT_ENTITY_V2 = "AEOS_EVENT_V2"
 ACTION_RESULT = "RESULT_DELIVER"
 ACTION_EXCEPTION = "EXCEPTION_DELIVER"
 ACTION_ENTITY = "EVENT_DELIVER"
+ACTION_ENTITY_V2 = "EVENT_V2_DELIVER"
 
 _EVENT_ACTION: dict[str, str] = {
     EVENT_RESULT: ACTION_RESULT,
     EVENT_EXCEPTION: ACTION_EXCEPTION,
     EVENT_ENTITY: ACTION_ENTITY,
+    EVENT_ENTITY_V2: ACTION_ENTITY_V2,
 }
 
 OUTBOX_PENDING = "PENDING"
@@ -196,6 +202,7 @@ async def _enqueue(
         log.started_at = utcnow()
         log.finished_at = None
         log.request_payload = wire
+        log.compat = compat_marker(wire)
 
     outbox = await _outbox_for_key(db, key)
     if outbox is not None and outbox.status != OUTBOX_DONE:
@@ -231,12 +238,44 @@ def _new_log(db: AsyncSession, *, action: str, key: str, contract_id: str, wire:
         status=LOG_PENDING,
         max_retry=settings.EBMS_MAX_RETRY,
         started_at=utcnow(),
+        compat=compat_marker(wire),
     )
     db.add(log)
     return log
 
 
 # ------------------------------------------------------------------ 试点 A：销售/订单经营结果
+
+
+async def _find_sales_result(db: AsyncSession, result_id: str) -> SalesResult | None:
+    return (
+        await db.execute(
+            select(SalesResult).where(
+                SalesResult.result_id == result_id,
+                SalesResult.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+
+
+def _result_of(sales_result: SalesResult):
+    """由持久化结果重建 ``AEOS.Result.V1`` 契约（仅 verified 才出站，F5-A02）。"""
+    return build_result_contract(
+        result_id=sales_result.result_id,
+        source_system=SOURCE_SYSTEM,
+        object_type=sales_result.object_ref_type,
+        object_id=sales_result.object_ref_id,
+        period_start=sales_result.period_start,
+        period_end=sales_result.period_end,
+        metric_code=sales_result.metric_code,
+        metric_value=float(sales_result.metric_value),
+        metric_unit=sales_result.metric_unit,
+        calculation_version=sales_result.calculation_version,
+        evidence_ids=list(sales_result.evidence_refs or []),
+        trace_id=f"TRACE-{sales_result.result_id}",
+        occurred_at=datetime.combine(sales_result.period_end, time(23, 59, 59), tzinfo=CN_TZ),
+        extra={"currency": sales_result.currency, "order_count": sales_result.order_count},
+    )
 
 
 async def emit_sales_result(
@@ -248,12 +287,15 @@ async def emit_sales_result(
     currency: str = "RMB",
     limit: int = 500,
 ) -> dict[str, Any]:
-    """把 CRM 侧销售/订单经营结果构造成 `AEOS.Result.V1` 并入库投递队列。
+    """聚合 CRM 侧经营结果并落 ``sales_result``（``submitted``，架构 §4.3）。
 
     口径说明：
-    - 统计区间为 `[period_start 00:00, period_end+1d 00:00)` 半开区间，避免边界重复计入。
+    - 统计区间为 ``[period_start 00:00, period_end+1d 00:00)`` 半开区间，避免边界重复计入。
     - 仅按同币种聚合，**不做汇率折算** —— 避免在 CRM 内重复定义 M09 财经口径（红线 4）。
-    - `evidence_ids` 记录全部计入的报价单 ID，满足「专业指标必须记录 calculation_version 与 evidence_ids」。
+    - ``evidence_refs`` 记录全部计入的报价单 ID，满足「专业指标必须记录 calculation_version 与 evidence_ids」。
+
+    ``submitted`` 表示执行方声明完成（done），**不等于 verified**（F5-A02）；只有经
+    ``services.verify.verify_result`` 接受后才构造 Result 出站（F5-A04）。
     """
     if metric_code not in METRIC_SPECS:
         raise ApiError(ErrCode.PARAM_ERROR, f"未知指标: {metric_code}，允许: {sorted(METRIC_SPECS)}")
@@ -292,33 +334,43 @@ async def emit_sales_result(
         value = round(total_amount, 4)
 
     result_id = f"RES-{SOURCE_SYSTEM}-{metric_code.upper()}-{period_start:%Y%m%d}-{period_end:%Y%m%d}-{currency}"
-    contract = build_result_contract(
-        result_id=result_id,
-        source_system=SOURCE_SYSTEM,
-        object_type="BusinessMetric",
-        object_id=metric_code,
-        period_start=period_start,
-        period_end=period_end,
-        metric_code=metric_code,
-        metric_value=value,
-        metric_unit=unit,
-        calculation_version=calculation_version,
-        evidence_ids=evidence_ids,
-        trace_id=f"TRACE-{result_id}",
-        occurred_at=datetime.combine(period_end, time(23, 59, 59), tzinfo=CN_TZ),
-        extra={"currency": currency, "order_count": order_count},
-    )
-
-    anchor = rows[0][0] if rows else uuid.uuid4()
-    _, log, created = await _enqueue(
-        db, contract=contract, event_type=EVENT_RESULT, biz_type="QUOTATION", biz_id=anchor
-    )
+    existing = await _find_sales_result(db, result_id)
+    if existing is None:
+        row = SalesResult(
+            result_id=result_id,
+            period_start=period_start,
+            period_end=period_end,
+            metric_code=metric_code,
+            metric_value=value,
+            metric_unit=unit,
+            calculation_version=calculation_version,
+            currency=currency,
+            order_count=order_count,
+            object_ref_type="BusinessMetric",
+            object_ref_id=metric_code,
+            status="submitted",
+            evidence_refs=evidence_ids,
+            fact_owner=SOURCE_SYSTEM,
+        )
+        db.add(row)
+        created = True
+    else:
+        row = existing
+        # 指标值变化 → 业务字段变更：revision 由监听器 +1，并重新进入 submitted 待验证
+        created = float(row.metric_value) != value
+        if created:
+            row.metric_value = value
+            row.order_count = order_count
+            row.evidence_refs = evidence_ids
+            row.status = "submitted"
     await db.flush()
 
     return {
         "batch_id": _batch_id(),
-        "contract_version": contract.contract_version,
-        "contract_id": contract.contract_id,
+        "contract_version": RESULT_CONTRACT_VERSION,
+        "contract_id": result_id,
+        "result_id": result_id,
+        "sales_result_id": str(row.id),
         "event_type": EVENT_RESULT,
         "metric_code": metric_code,
         "metric_value": value,
@@ -326,10 +378,87 @@ async def emit_sales_result(
         "currency": currency,
         "order_count": order_count,
         "evidence_count": len(evidence_ids),
+        "status": row.status,
+        "revision": row.revision,
+        "created": created,
+        "skipped": not created,
+        "delivered": False,
+        "log_id": None,
+        "idempotency_key": None,
+    }
+
+
+async def emit_result_verified(db: AsyncSession, sales_result: SalesResult) -> dict[str, Any]:
+    """``verify`` 接受后构造并投递 VERIFIED Result（F5-A04 唯一联动路径）。"""
+    contract = _result_of(sales_result)
+    _, log, created = await _enqueue(
+        db,
+        contract=contract,
+        event_type=EVENT_RESULT,
+        biz_type="SALES_RESULT",
+        biz_id=sales_result.id,
+    )
+    await db.flush()
+    return {
+        "contract_version": contract.contract_version,
+        "contract_id": contract.contract_id,
+        "event_type": EVENT_RESULT,
         "created": created,
         "skipped": not created,
         "log_id": str(log.id) if log else None,
         "idempotency_key": log.idempotency_key if log else None,
+    }
+
+
+async def emit_sales_result_verified_event(
+    db: AsyncSession,
+    sales_result: SalesResult,
+    *,
+    verification_id: uuid.UUID | None = None,
+    actor_id: str | None = None,
+    evidence_refs: list[str] | None = None,
+) -> dict[str, Any]:
+    """发出 L2 ``SalesResultVerified`` 事件（AEOS.Event.V2，F1-A05/F11）。"""
+    contract = build_event_v2_contract(
+        event_id=f"EVT-V2-{SOURCE_SYSTEM}-{uuid.uuid4().hex[:12]}",
+        event_type="SalesResultVerified",
+        object_type="SalesResult",
+        object_id=sales_result.result_id,
+        payload={
+            "result_id": sales_result.result_id,
+            "status": sales_result.status,
+            "metric_code": sales_result.metric_code,
+            "metric_value": float(sales_result.metric_value),
+            "metric_unit": sales_result.metric_unit,
+            "calculation_version": sales_result.calculation_version,
+            "revision": sales_result.revision,
+            "verification_id": str(verification_id) if verification_id else None,
+        },
+        occurred_at=cn_now(),
+        correlation_id=f"CORR-{sales_result.result_id}",
+        actor_id=actor_id or SOURCE_SYSTEM,
+        payload_version=RESULT_CONTRACT_VERSION,
+        evidence_refs=list(evidence_refs or []),
+        trace_id=f"TRACE-V2-{SOURCE_SYSTEM}-{sales_result.result_id}",
+    )
+    key = contract.idempotency_key
+    _, log, created = await _enqueue(
+        db,
+        contract=contract,
+        event_type=EVENT_ENTITY_V2,
+        biz_type="SALES_RESULT",
+        biz_id=sales_result.id,
+        idempotency_key=key,
+    )
+    await db.flush()
+    return {
+        "contract_version": contract.contract_version,
+        "event_id": contract.event_id,
+        "event_type": contract.event_type,
+        "created": created,
+        "skipped": not created,
+        "log_id": str(log.id) if log else None,
+        "idempotency_key": key,
     }
 
 
@@ -557,7 +686,9 @@ async def _deliver_one(db: AsyncSession, row: IntegrationOutbox, transport: Ebms
         return "failed"
 
     try:
-        contract = validate_contract(payload)
+        # 出站归一：Result/Exception 补 L2 增补字段（V1 事件原样，L1 严格端不收额外字段）
+        payload = normalize_outbound(payload)
+        contract = validate_contract(payload, direction="outbound")
     except ContractValidationError:
         # 契约不合规属确定性错误，重试无意义 → 直接终态（正常路径下 enqueue 已校验，此处仅防御）
         await _mark_outbox(row, status=OUTBOX_FAILED)
@@ -664,9 +795,9 @@ async def retry(db: AsyncSession, log_id: uuid.UUID, *, transport: EbmsTransport
         }
 
     transport = transport or EbmsTransport.from_settings()
-    payload = dict(log.request_payload or {})
+    payload = normalize_outbound(dict(log.request_payload or {}))
     try:
-        contract = validate_contract(payload)
+        contract = validate_contract(payload, direction="outbound")
     except ContractValidationError as exc:
         log.status = LOG_DEAD_LETTER
         log.error_message = f"契约校验失败: {exc.message}"

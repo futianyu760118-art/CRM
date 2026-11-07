@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import BaseModel, BusinessModel
+from app.db.base import AeosObjectMixin, BaseModel, BusinessModel
 
 MONEY = Numeric(18, 4)
 
@@ -66,7 +66,7 @@ class PricingRule(BaseModel):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
-class Quotation(BusinessModel):
+class Quotation(BusinessModel, AeosObjectMixin):
     """报价单。"""
 
     __tablename__ = "quotation"

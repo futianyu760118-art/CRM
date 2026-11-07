@@ -106,6 +106,10 @@ PERMISSIONS: list[dict[str, Any]] = [
     _button("feedback:create", "反馈创建"),
     _button("feedback:handle", "反馈处理"),
     _button("feedback:delete", "反馈删除"),
+    # 经营结果验证（AEOS F5；View / Operation / Verify 三类权限相互独立，F5-A06）
+    _menu("result:view", "经营结果", "/results", "SafetyCertificateOutlined", 175),
+    _button("result:operation", "经营结果提交"),
+    _button("result:verify", "结果验证"),
     # 集成
     _menu("integration:view", "K3集成日志", "/integrations/k3/logs", "ApiOutlined", 130),
     # 系统设置
@@ -157,6 +161,7 @@ ROLE_TEMPLATES: dict[str, dict[str, Any]] = {
         + _codes("sample")
         + _codes("quote")
         + _codes("feedback")
+        + _codes("result")
         + _codes("integration")
         + ["audit:view"],
         "scope_type": "ALL",
@@ -179,7 +184,8 @@ ROLE_TEMPLATES: dict[str, dict[str, Any]] = {
         + _codes("order")
         + _codes("sample")
         + _codes("quote")
-        + _codes("feedback"),
+        + _codes("feedback")
+        + ["result:view", "result:verify"],
         "scope_type": "DEPT_AND_CHILD",
     },
     "sales": {
@@ -233,6 +239,12 @@ ROLE_TEMPLATES: dict[str, dict[str, Any]] = {
             "task:create",
         ],
         "scope_type": "SELF",
+    },
+    "verifier": {
+        "name": "结果验证员",
+        "description": "仅查看与验证经营结果，不授予业务写权限（F5-A06）",
+        "permissions": ["dashboard:view", "result:view", "result:verify"],
+        "scope_type": "ALL",
     },
     "pricing": {
         "name": "核价员",

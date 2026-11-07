@@ -11,14 +11,14 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import BaseModel, BusinessModel
+from app.db.base import AeosObjectMixin, BaseModel, BusinessModel
 
 MONEY = Numeric(18, 4)
 RATE = Numeric(18, 6)
 
 
 # ------------------------------------------------------------------ M2 线索
-class Lead(BusinessModel):
+class Lead(BusinessModel, AeosObjectMixin):
     """线索（外部获客入口）。"""
 
     __tablename__ = "lead"
@@ -41,7 +41,7 @@ class Lead(BusinessModel):
 
 
 # ------------------------------------------------------------------ M2 客户
-class Company(BusinessModel):
+class Company(BusinessModel, AeosObjectMixin):
     """客户主表。"""
 
     __tablename__ = "company"
@@ -85,7 +85,7 @@ class Company(BusinessModel):
     )
 
 
-class Contact(BusinessModel):
+class Contact(BusinessModel, AeosObjectMixin):
     """联系人。"""
 
     __tablename__ = "contact"
@@ -127,7 +127,7 @@ class BusinessCode(BaseModel):
 
 
 # ------------------------------------------------------------------ M3 商机
-class Opportunity(BusinessModel):
+class Opportunity(BusinessModel, AeosObjectMixin):
     """商机（阶段由状态机约束）。"""
 
     __tablename__ = "opportunity"
@@ -197,7 +197,7 @@ class Sku(BaseModel):
 
 
 # ------------------------------------------------------------------ M3 询价
-class Inquiry(BusinessModel):
+class Inquiry(BusinessModel, AeosObjectMixin):
     """询价单（单据头，字段对齐客户询价单模板）。"""
 
     __tablename__ = "inquiry"

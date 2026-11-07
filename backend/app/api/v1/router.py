@@ -27,6 +27,7 @@ from app.api.v1.endpoints import (
     products,
     quotations,
     quote_library,
+    results,
     roles,
     samples,
     system,
@@ -70,6 +71,7 @@ api_router.include_router(orders.router)
 api_router.include_router(samples.router)
 api_router.include_router(quote_library.router)
 api_router.include_router(feedback.router)
+api_router.include_router(results.router)
 
 # M5 邮件闭环
 api_router.include_router(emails.account_router)

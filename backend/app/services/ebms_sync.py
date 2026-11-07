@@ -21,6 +21,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.contracts.compat import to_outbound_risk
 from app.domain.state_machine import INQUIRY_STATUS_MIGRATION
 from app.models.business import Company, Inquiry, InquiryItem
 from app.models.sales import Feedback, QuoteLibrary, SalesOrder, Sample
@@ -211,7 +212,8 @@ def sales_order_payload(o: SalesOrder) -> dict[str, Any]:
             "completed_qty": _dec(o.completed_qty),
             "order_amount": _dec(o.order_amount),
             "status": o.status,
-            "risk_level": o.risk_level,
+            # 出站风险域仅 3 值（F7-A03/Q11 双口径）：表单 low/medium/high → blue/yellow/red
+            "risk_level": to_outbound_risk(o.risk_level),
             "promised_date": _ser(o.promised_date),
             "plan_date": _ser(o.plan_date),
             "online_date": _ser(o.online_date),

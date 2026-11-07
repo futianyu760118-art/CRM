@@ -33,6 +33,8 @@ class IntegrationLog(BaseModel):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: 兼容标记：`L2`（原生 V2/新字段）/ `legacy`（L1 旧报文经兼容层补默认）/ `V1x`（L1 增补字段）
+    compat: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
 
 
 class IntegrationOutbox(BaseModel):

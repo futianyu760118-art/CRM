@@ -32,6 +32,10 @@ from app.contracts.aeos import (
 
 # --- 逐键抄录自 EBMS/contracts/aeos-contracts-v1.examples.json -------------------
 
+# L1 必填集逐字不变；PAND-330 M2 按架构 F2-A01/A02/A03 在原位增补
+# source/version/object_ref/evidence_refs（V1.x，不升版本号）。
+L2_RESULT_ADDITIONS = {"source", "version", "object_ref", "evidence_refs"}
+
 BASELINE_RESULT_KEYS = {
     "contract_version",
     "result_id",
@@ -44,7 +48,7 @@ BASELINE_RESULT_KEYS = {
     "evidence_ids",
     "trace_id",
     "occurred_at",
-}
+} | L2_RESULT_ADDITIONS
 BASELINE_EXCEPTION_KEYS = {
     "contract_version",
     "exception_id",
@@ -57,14 +61,17 @@ BASELINE_EXCEPTION_KEYS = {
     "evidence_ids",
     "trace_id",
     "occurred_at",
-}
+} | L2_RESULT_ADDITIONS
 BASELINE_PERIOD_KEYS = {"start", "end"}
 BASELINE_METRIC_KEYS = {"code", "value", "unit", "calculation_version"}
 
 VALID_RESULT = {
     "contract_version": RESULT_CONTRACT_VERSION,
     "result_id": "RES-EXAMPLE",
+    "source": "M09",
     "source_system": "M09",
+    "version": RESULT_CONTRACT_VERSION,
+    "object_ref": {"object_type": "BusinessMetric", "object_id": "gross_margin"},
     "object_type": "BusinessMetric",
     "object_id": "gross_margin",
     "period": {"start": "2026-09-01", "end": "2026-09-30"},
@@ -76,6 +83,7 @@ VALID_RESULT = {
     },
     "status": "VERIFIED",
     "evidence_ids": ["EVD-EXAMPLE"],
+    "evidence_refs": ["EVD-EXAMPLE"],
     "trace_id": "TRACE-EXAMPLE",
     "occurred_at": "2026-10-01T09:00:00+08:00",
 }
@@ -83,13 +91,17 @@ VALID_RESULT = {
 VALID_EXCEPTION = {
     "contract_version": EXCEPTION_CONTRACT_VERSION,
     "exception_id": "EXC-EXAMPLE",
+    "source": "M06",
     "source_system": "M06",
+    "version": EXCEPTION_CONTRACT_VERSION,
+    "object_ref": {"object_type": "DeliveryOrder", "object_id": "ORDER-EXAMPLE"},
     "object_type": "DeliveryOrder",
     "object_id": "ORDER-EXAMPLE",
     "severity": "high",
     "reason_code": "DELIVERY_RISK",
     "status": "OPEN",
     "evidence_ids": [],
+    "evidence_refs": [],
     "trace_id": "TRACE-EXAMPLE",
     "occurred_at": "2026-10-01T09:00:00+08:00",
 }
@@ -165,7 +177,20 @@ class TestRejections:
             validate_contract({**VALID_RESULT, "contract_version": "AEOS.Result.V9"})
         assert "未知契约版本" in exc.value.message
 
-    @pytest.mark.parametrize("missing", ["result_id", "period", "metric", "evidence_ids", "trace_id"])
+    @pytest.mark.parametrize(
+        "missing",
+        [
+            "result_id",
+            "period",
+            "metric",
+            "evidence_ids",
+            "trace_id",
+            "source",
+            "version",
+            "object_ref",
+            "evidence_refs",
+        ],
+    )
     def test_missing_required_field_rejected(self, missing: str) -> None:
         payload = {k: v for k, v in VALID_RESULT.items() if k != missing}
         with pytest.raises(ContractValidationError) as exc:
@@ -202,6 +227,52 @@ class TestRejections:
     def test_blank_trace_id_rejected(self) -> None:
         with pytest.raises(ContractValidationError):
             validate_contract({**VALID_EXCEPTION, "trace_id": ""})
+
+    def test_result_source_must_equal_source_system(self) -> None:
+        with pytest.raises(ContractValidationError):
+            validate_contract({**VALID_RESULT, "source": "M06"})
+
+    def test_result_object_ref_must_match_flat_fields(self) -> None:
+        with pytest.raises(ContractValidationError):
+            validate_contract(
+                {**VALID_RESULT, "object_ref": {"object_type": "Other", "object_id": "gross_margin"}}
+            )
+
+    def test_result_evidence_refs_must_equal_evidence_ids(self) -> None:
+        with pytest.raises(ContractValidationError):
+            validate_contract({**VALID_RESULT, "evidence_refs": ["EVD-OTHER"]})
+
+    def test_exception_source_must_equal_source_system(self) -> None:
+        with pytest.raises(ContractValidationError):
+            validate_contract({**VALID_EXCEPTION, "source": "M09"})
+
+
+class TestL1BackwardCompatibility:
+    """L1 报文（无 L2 增补字段）经 compat 归一后仍可解析（F2-A04）。"""
+
+    def test_l1_result_normalizes_and_validates(self) -> None:
+        from app.contracts.compat import normalize_result
+
+        l1_result = {k: v for k, v in VALID_RESULT.items() if k not in L2_RESULT_ADDITIONS}
+        contract = validate_contract(normalize_result(l1_result))
+        assert isinstance(contract, AeosResultContract)
+        assert contract.source == contract.source_system == "M09"
+        assert contract.object_ref.object_id == "gross_margin"
+        assert contract.evidence_refs == contract.evidence_ids
+
+    def test_l1_exception_normalizes_and_validates(self) -> None:
+        from app.contracts.compat import normalize_exception
+
+        l1_exception = {k: v for k, v in VALID_EXCEPTION.items() if k not in L2_RESULT_ADDITIONS}
+        contract = validate_contract(normalize_exception(l1_exception))
+        assert isinstance(contract, AeosExceptionContract)
+        assert contract.object_ref.object_type == "DeliveryOrder"
+
+    def test_l2_additions_are_not_prefilled_by_model_defaults(self) -> None:
+        # 出站方向不得依赖模型默认值补齐 L2 字段：缺字段即拒（F2-A01）。
+        l1_result = {k: v for k, v in VALID_RESULT.items() if k not in L2_RESULT_ADDITIONS}
+        with pytest.raises(ContractValidationError):
+            validate_contract(l1_result)
 
 
 class TestBuilders:

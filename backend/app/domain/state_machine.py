@@ -243,6 +243,16 @@ FEEDBACK_FOLLOWUP_ACTIONS: list[str] = ["submit", "comment", "status", "assign",
 # 同步状态（契约 §4.2）
 SYNC_STATUSES: list[str] = ["PENDING", "SYNCING", "SYNCED", "CONFLICT"]
 
+# ---------------------------------------------------------------- AEOS Verification / SalesResult（PAND-330）
+
+#: SalesResult 内部生命周期：submitted（执行方声明完成，done）→ verified（经 verify 接受）。
+#: L1 线格式 ``result_status`` 仍只有 VERIFIED，submitted 不上线（架构 §4.3）。
+SALES_RESULT_STATUSES: list[str] = ["submitted", "verified"]
+#: Verification.status（F5-A01）
+VERIFICATION_STATUSES: list[str] = ["passed", "failed", "exempt"]
+#: 本期唯一被验证主体类型（扩展须登记，F5-A01）
+VERIFICATION_SUBJECT_TYPES: list[str] = ["result"]
+
 
 def allowed_order_transitions(current: str) -> list[str]:
     """订单正向推进链（closed/cancelled 需显式选择，终态无后续）。"""

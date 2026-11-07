@@ -31,6 +31,9 @@ class PilotResultIn(BaseModel):
     currency: str = "RMB"
     limit: int = Field(default=500, ge=1, le=5000)
     deliver: bool = Field(default=True, description="入队后立即投递（联调一把过）")
+    auto_verify: bool = Field(
+        default=True, description="联调试点：提交后自动按 passed 验证（正式流程走 /results/{id}/verify）"
+    )
 
 
 class PilotExceptionIn(BaseModel):

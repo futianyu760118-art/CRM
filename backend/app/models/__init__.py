@@ -43,6 +43,7 @@ from app.models.sales import (
     InquiryStatusLog,
     QuoteLibrary,
     SalesOrder,
+    SalesResult,
     Sample,
     SyncConflict,
 )
@@ -61,6 +62,7 @@ from app.models.user import (
     User,
     UserRole,
 )
+from app.models.verification import Verification
 
 __all__ = [
     "Base",
@@ -106,6 +108,9 @@ __all__ = [
     "FeedbackFollowup",
     "SyncConflict",
     "InquiryStatusLog",
+    # AEOS 验证闭环（PAND-330）
+    "SalesResult",
+    "Verification",
     # M5 邮件
     "File",
     "EmailAccount",

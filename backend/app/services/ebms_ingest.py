@@ -32,9 +32,9 @@ from app.contracts.aeos import (
     AeosEventContract,
     ContractValidationError,
     event_idempotency_key,
-    to_wire,
     validate_contract,
 )
+from app.contracts.compat import compat_marker, normalize_event_v1, normalize_inbound_payload
 from app.db.base import utcnow
 from app.domain.state_machine import EXTERNAL_ORDER_STATUS_MAP
 from app.models.business import Company, Inquiry, InquiryItem
@@ -572,7 +572,11 @@ async def ingest_event(
     幂等键 = ``M05:{event_type}:{object_id}:{fingerprint}``；头/体均缺时按整包口径重算。
     ``dictionary.upserted`` 暂不落 CRM 业务表，返回「未实现」不 500。
     """
-    contract = validate_contract(event)
+    # 兼容层：旧报文补 L2 默认后校验；幂等键仍按原始报文计算（F8-A02 指纹不变）
+    raw = dict(event)
+    marker = compat_marker(raw)
+    normalized = normalize_event_v1(raw)
+    contract = validate_contract(normalized, direction="inbound")
     if not isinstance(contract, AeosEventContract):
         raise ContractValidationError(f"期望 AEOS.Event.V1，实际 {contract.contract_version}")
 
@@ -587,8 +591,7 @@ async def ingest_event(
             "object_id": contract.object_id,
         }
 
-    wire = to_wire(contract)
-    key = _resolve_key(contract, wire, event.get("idempotency_key"), header_idempotency_key)
+    key = _resolve_key(contract, raw, raw.get("idempotency_key"), header_idempotency_key)
 
     existing = await _find_ingest_log(db, key)
     if existing is not None and existing.status == LOG_SUCCESS:
@@ -599,7 +602,8 @@ async def ingest_event(
             "idempotency_key": key,
         }
 
-    result = await _apply_object(db, contract, dict(contract.payload), key)
+    payload = normalize_inbound_payload(contract.event_type, dict(contract.payload))
+    result = await _apply_object(db, contract, payload, key)
 
     db.add(
         IntegrationLog(
@@ -608,11 +612,12 @@ async def ingest_event(
             request_id=contract.event_id,
             idempotency_key=key,
             business_id=contract.object_id,
-            request_payload=dict(event),
+            request_payload=raw,
             response_payload=result,
             status=LOG_SUCCESS,
             started_at=utcnow(),
             finished_at=utcnow(),
+            compat=marker,
         )
     )
     await db.flush()
