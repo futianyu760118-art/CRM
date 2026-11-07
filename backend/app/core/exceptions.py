@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -128,7 +129,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
         return JSONResponse(
             status_code=exc.http_status,
-            content=_payload(exc.code, exc.message, exc.data),
+            content=jsonable_encoder(_payload(exc.code, exc.message, exc.data)),
         )
 
     @app.exception_handler(RequestValidationError)

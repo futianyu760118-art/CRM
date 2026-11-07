@@ -50,6 +50,17 @@ async def _get_or_create_link(
     if link is not None:
         link.relation_type = relation_type
         return link
+    # 会话 autoflush=False：同事务内已 add 未 flush 的 link 对 SELECT 不可见，
+    # 直接复用，避免二次 db.add 触发 uq_contact_company_link 唯一约束冲突。
+    for pending in db.new:
+        if (
+            isinstance(pending, ContactCompanyLink)
+            and pending.contact_id == contact.id
+            and pending.company_id == company_id
+            and pending.deleted_at is None
+        ):
+            pending.relation_type = relation_type
+            return pending
     # 软删行仍占用 (contact_id, company_id) 唯一键，复用并复活
     stale = (
         await db.execute(
@@ -88,12 +99,17 @@ async def attach_company(
     if contact.company_id is None:
         contact.company_id = company_id
     if is_primary:
-        await set_primary(db, contact, company_id)
+        await set_primary(db, contact, company_id, link=link)
     await db.flush()
     return link
 
 
-async def set_primary(db: AsyncSession, contact: Contact, company_id: uuid.UUID) -> None:
+async def set_primary(
+    db: AsyncSession,
+    contact: Contact,
+    company_id: uuid.UUID,
+    link: ContactCompanyLink | None = None,
+) -> None:
     """设该客户的主要联系人，旧主自动取消（含主档冗余列）。"""
     await db.execute(
         update(ContactCompanyLink)
@@ -115,7 +131,8 @@ async def set_primary(db: AsyncSession, contact: Contact, company_id: uuid.UUID)
         )
         .values(is_primary=False, updated_at=utcnow())
     )
-    link = await _get_or_create_link(db, contact, company_id, dic.CONTACT_RELATION_DEFAULT)
+    if link is None:
+        link = await _get_or_create_link(db, contact, company_id, dic.CONTACT_RELATION_DEFAULT)
     link.is_primary = True
     contact.company_id = company_id
     contact.is_primary = True
@@ -168,7 +185,7 @@ async def contact_companies_map(
     for link, company in rows:
         result[link.contact_id].append(
             {
-                "company_id": company.id,
+                "company_id": str(company.id),
                 "company_code": company.code,
                 "company_name": company.name,
                 "relation_type": link.relation_type,
@@ -195,7 +212,7 @@ async def contact_companies_map(
                 company = companies[contact.company_id]
                 result[contact.id].append(
                     {
-                        "company_id": company.id,
+                        "company_id": str(company.id),
                         "company_code": company.code,
                         "company_name": company.name,
                         "relation_type": dic.CONTACT_RELATION_DEFAULT,
