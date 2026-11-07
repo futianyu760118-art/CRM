@@ -1,7 +1,7 @@
 """pand-330 M1 AEOS Object/Owner 列 + verification/sales_result + compat
 
 Revision ID: pand330a1
-Revises: b8f2c4d6e8a1
+Revises: aeos_lead_intake
 Create Date: 2026-11-03 10:00:00.000000
 
 架构 §5 revision_01（schema）：
@@ -20,7 +20,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision: str = "pand330a1"
-down_revision: str | None = "b8f2c4d6e8a1"
+down_revision: str | None = "aeos_lead_intake"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
