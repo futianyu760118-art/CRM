@@ -1,7 +1,8 @@
-"""EBMS 集成通道（AEOS 契约投递）。
+"""AEOS 集成通道（Result/Exception→EBMS，Entity→M02/EDP）。
 
 红线（本模块严格遵守）：
-- 不直写 EBMS 库：只经 `IntegrationOutbox` 落库 + `EbmsTransport` 对外投递契约。
+- 不直写外部系统库：只经 `IntegrationOutbox` 落库后异步投递。
+- `AEOS.Event.V1` 实体事件统一经 M02/EDP；Result/Exception 保留 EBMS 结果汇总通道。
 - 不新增 CRM 业务内容：复用既有 `integration_outbox` / `integration_log`，读取既有
   `quotation` 数据，不新增业务表、不改业务状态机。
 
@@ -43,6 +44,7 @@ from app.models.integration import IntegrationLog, IntegrationOutbox
 from app.models.pricing import Quotation
 from app.models.sales import Feedback, QuoteLibrary, SalesOrder, Sample
 from app.services.ebms_transport import DeliveryResult, EbmsTransport
+from app.services.edp_transport import EdpEntityTransport
 
 # 契约源系统：CRM = M05 销售自治（EBMS/docs/AEOS_V7.2_DATA_OWNERSHIP_V1.md）
 SOURCE_SYSTEM = "M05"
@@ -221,15 +223,16 @@ async def _enqueue(
 
 
 def _new_log(db: AsyncSession, *, action: str, key: str, contract_id: str, wire: dict[str, Any]) -> IntegrationLog:
+    entity_event = action == ACTION_ENTITY
     log = IntegrationLog(
-        system="EBMS",
+        system="M02" if entity_event else "EBMS",
         action=action,
         request_id=uuid.uuid4().hex,
         idempotency_key=key,
         business_id=contract_id,
         request_payload=wire,
         status=LOG_PENDING,
-        max_retry=settings.EBMS_MAX_RETRY,
+        max_retry=settings.EDP_MAX_RETRY if entity_event else settings.EBMS_MAX_RETRY,
         started_at=utcnow(),
     )
     db.add(log)
@@ -474,9 +477,9 @@ async def emit_entity_event(
     biz_id: uuid.UUID,
     occurred_at: datetime | None = None,
 ) -> dict[str, Any]:
-    """把 CRM 侧实体变更构造成 `AEOS.Event.V1` 入队 Outbox（不直写 EBMS 库）。
+    """把 CRM 侧实体变更构造成 `AEOS.Event.V1` 入队 Outbox（统一经 M02/EDP）。
 
-    - 幂等键 = ``EBMS:{event_type}:{object_id}:{fingerprint}``，同内容重复写入被跳过，
+    - 幂等键目标 = M02，同内容重复写入被跳过，
       数值变化产生新投递（与试点 A/B 幂等语义一致）。
     - 本函数只负责入队，投递由 Worker/联调端点调用 ``deliver_pending`` 完成。
     """
@@ -493,8 +496,8 @@ async def emit_entity_event(
         trace_id=f"TRACE-EVT-{SOURCE_SYSTEM}-{object_type}-{object_id}",
         occurred_at=occurred_at or cn_now(),
     )
-    key = event_idempotency_key("EBMS", to_wire(contract))
-    # 幂等键随报文体下发（EBMS aeos-http.js 头/体一致性校验），并作为出站投递的幂等键
+    key = event_idempotency_key("M02", to_wire(contract))
+    # 幂等键作为 CRM→M02/EDP 事件写入的稳定去重键。
     contract.idempotency_key = key
     _, log, created = await _enqueue(
         db,
@@ -548,7 +551,7 @@ async def _mark_entity_sync_status(db: AsyncSession, row: IntegrationOutbox, sta
             obj.last_sync_at = utcnow()
 
 
-async def _deliver_one(db: AsyncSession, row: IntegrationOutbox, transport: EbmsTransport) -> str:
+async def _deliver_one(db: AsyncSession, row: IntegrationOutbox, transport: Any) -> str:
     """投递单条 Outbox，返回结果标签：delivered/skipped/failed/dead_letter。"""
     action = _EVENT_ACTION.get(row.event_type)
     payload = dict(row.payload or {})
@@ -609,10 +612,13 @@ async def _deliver_one(db: AsyncSession, row: IntegrationOutbox, transport: Ebms
 
 
 async def deliver_pending(
-    db: AsyncSession, *, limit: int = 50, transport: EbmsTransport | None = None
+    db: AsyncSession, *, limit: int = 50, transport: Any | None = None
 ) -> dict[str, Any]:
-    """投递所有到期未处理的 EBMS Outbox（Worker / 联调端点入口）。"""
-    transport = transport or EbmsTransport.from_settings()
+    """投递所有到期 Outbox。
+
+    显式传入 transport 时用于测试/人工联调并覆盖默认路由；
+    默认情况下 Result/Exception→EBMS，AEOS.Event.V1→M02/EDP。
+    """
     now = utcnow()
     rows = list(
         (
@@ -633,18 +639,36 @@ async def deliver_pending(
     )
 
     tally = {"delivered": 0, "skipped": 0, "failed": 0, "dead_letter": 0}
+    used_modes: set[str] = set()
     for row in rows:
-        tally[await _deliver_one(db, row, transport)] += 1
+        selected = transport
+        if selected is None:
+            selected = (
+                EdpEntityTransport.from_settings()
+                if row.event_type == EVENT_ENTITY
+                else EbmsTransport.from_settings()
+            )
+        used_modes.add(str(selected.mode))
+        tally[await _deliver_one(db, row, selected)] += 1
     await db.flush()
 
+    if transport is not None:
+        mode = str(transport.mode)
+    elif len(used_modes) == 1:
+        mode = next(iter(used_modes))
+    elif not used_modes:
+        mode = "none"
+    else:
+        mode = "mixed"
+
     return {
-        "mode": transport.mode,
+        "mode": mode,
         "picked": len(rows),
         **tally,
     }
 
 
-async def retry(db: AsyncSession, log_id: uuid.UUID, *, transport: EbmsTransport | None = None) -> dict[str, Any]:
+async def retry(db: AsyncSession, log_id: uuid.UUID, *, transport: Any | None = None) -> dict[str, Any]:
     """按日志重投契约（真正重新投递，而非仅改状态）。"""
     log = (
         await db.execute(select(IntegrationLog).where(IntegrationLog.id == log_id, IntegrationLog.deleted_at.is_(None)))
@@ -663,7 +687,12 @@ async def retry(db: AsyncSession, log_id: uuid.UUID, *, transport: EbmsTransport
             "message": f"重试次数已达上限（{log.max_retry}），进入死信队列",
         }
 
-    transport = transport or EbmsTransport.from_settings()
+    if transport is None:
+        transport = (
+            EdpEntityTransport.from_settings()
+            if log.action == ACTION_ENTITY
+            else EbmsTransport.from_settings()
+        )
     payload = dict(log.request_payload or {})
     try:
         contract = validate_contract(payload)
@@ -777,7 +806,7 @@ async def _count_entity_log(db: AsyncSession, status: str) -> int:
                 .select_from(IntegrationLog)
                 .where(
                     IntegrationLog.deleted_at.is_(None),
-                    IntegrationLog.system == "EBMS",
+                    IntegrationLog.system == "M02",
                     IntegrationLog.action == ACTION_ENTITY,
                     IntegrationLog.status == status,
                 )
@@ -790,7 +819,7 @@ async def reconcile(db: AsyncSession) -> dict[str, Any]:
     """对账：结果/异常/实体三条通道的产出与投递，以及 6 模块本地计数（R5）。
 
     `event` 通道即 ``AEOS_EVENT_V1`` 回写事件：pending/failed/dead_letter 任一非零
-    都代表「CRM 已修改但 EBMS 未落库」，此时 `consistent=false`。
+    都代表「CRM 已修改但实体事件尚未经 M02/EDP 完成投递」，此时 `consistent=false`。
     """
     result = {
         "produced": await _count_outbox(db, EVENT_RESULT),
@@ -818,7 +847,7 @@ async def reconcile(db: AsyncSession) -> dict[str, Any]:
             .select_from(IntegrationLog)
             .where(
                 IntegrationLog.deleted_at.is_(None),
-                IntegrationLog.system == "EBMS",
+                IntegrationLog.system.in_(("EBMS", "M02")),
                 IntegrationLog.status == LOG_DEAD_LETTER,
             )
         )
