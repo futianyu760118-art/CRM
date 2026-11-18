@@ -39,15 +39,24 @@ class Settings(BaseSettings):
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
 
-    # EBMS 集成（AEOS 契约投递）
-    # mode: http（POST 到 EBMS 摄入端点）/ spool（落地本地 spool 目录，无 EBMS 时联调）
-    #       / dry_run（仅记录，不产生外部副作用）
+    # EBMS 集成（Result/Exception 结果汇总通道）
+    # mode: http / spool / dry_run
     EBMS_DELIVERY_MODE: str = "spool"
     EBMS_INGEST_URL: str = ""
     EBMS_INGEST_TOKEN: str = ""
     EBMS_SPOOL_DIR: str = "var/ebms-spool"
     EBMS_TIMEOUT_SECONDS: float = 10.0
     EBMS_MAX_RETRY: int = 5
+
+    # M02/EDP 实体事件出站（AEOS.Event.V1）。
+    # 实体事件统一经 M02/EDP；Result/Exception 继续走 EBMS。
+    EDP_DELIVERY_MODE: str = "spool"
+    EDP_BASE_URL: str = ""
+    EDP_API_KEY: str = ""
+    EDP_SPOOL_DIR: str = "var/edp-spool"
+    EDP_TIMEOUT_SECONDS: float = 10.0
+    EDP_MAX_RETRY: int = 5
+
     # 入站摄入 Bearer Token（EBMS → CRM 同步通道鉴权）。
     # 生产必须显式设置强随机值，禁止沿用默认口令（红线）。
     EBMS_INBOUND_TOKEN: str = ""
