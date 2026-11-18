@@ -41,7 +41,9 @@ OVERDUE_AT = datetime(2026, 8, 8, 4, 0, tzinfo=UTC)
 
 async def _clean(session) -> None:
     """只清理本测试写入的数据。"""
-    await session.execute(delete(IntegrationLog).where(IntegrationLog.system == "EBMS"))
+    await session.execute(
+        delete(IntegrationLog).where(IntegrationLog.system.in_(("EBMS", "M02")))
+    )
     await session.execute(
         delete(IntegrationOutbox).where(
             IntegrationOutbox.event_type.in_((ebms.EVENT_RESULT, ebms.EVENT_EXCEPTION, ebms.EVENT_ENTITY))
@@ -123,7 +125,9 @@ async def _ebms_logs(session) -> list[IntegrationLog]:
     return list(
         (
             await session.execute(
-                select(IntegrationLog).where(IntegrationLog.system == "EBMS").order_by(IntegrationLog.created_at)
+                select(IntegrationLog)
+                .where(IntegrationLog.system.in_(("EBMS", "M02")))
+                .order_by(IntegrationLog.created_at)
             )
         )
         .scalars()
