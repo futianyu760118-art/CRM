@@ -2,7 +2,7 @@
 
 设计要点（契约冻结版 §5 读法 A）：
 - EBMS 仅一次性迁移来源，CRM 为长期 Owner。出站把 CRM 侧实体变更构造成
-  ``AEOS.Event.V1`` 事件入队 Outbox（经 ``services.ebms.emit_entity_event``），不直写 EBMS 库。
+  ``AEOS.Event.V1`` 事件入队 Outbox，并统一经 M02/EDP 分发，不直写其他系统库。
 - 字段级 Owner：对象已存在时，入站 UPSERT 仅应用 ``EBMS_OWNED_FIELDS`` 中的字段；
   其余字段由 CRM 拥有（见 ``services.ebms_ingest`` 的 OWNER_KEPT 冲突留痕）。
 - 出站字段名对齐 EBMS 契约 §4.3 字段表（如 ``customer_code``/``serial_number``/
