@@ -11,7 +11,6 @@ import pytest
 from app.services import edp_transport
 from app.services.edp_transport import EdpEntityTransport
 
-
 EVENT_CONTRACT: dict[str, Any] = {
     "contract_version": "AEOS.Event.V1",
     "event_id": "EVT-M05-001",
