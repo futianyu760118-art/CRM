@@ -219,7 +219,11 @@ def _previous_assignment_count(logs: list[IntegrationLog], event: PersonLifecycl
     count = 0
     for log in logs:
         payload = log.request_payload or {}
-        if payload.get("tenant_id") != event.tenant_id or payload.get("object_id") != event.object_id or payload.get("event_type") != "person.offboarded":
+        if (
+            payload.get("tenant_id") != event.tenant_id
+            or payload.get("object_id") != event.object_id
+            or payload.get("event_type") != "person.offboarded"
+        ):
             continue
         changed = log.response_payload.get("changed", {}) if log.response_payload else {}
         count = max(count, sum(int(changed.get(key, 0)) for key in ("owners", "tasks", "approvals")))
